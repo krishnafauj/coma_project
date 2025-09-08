@@ -3,8 +3,7 @@ import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
-
-import { useColorScheme } from '@/hooks/useColorScheme';
+import { useColorScheme } from 'react-native'; // Use built-in hook
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
@@ -13,15 +12,14 @@ export default function RootLayout() {
   });
 
   if (!loaded) {
-    // Async font loading only occurs in development.
-    return null;
+    return null; // Wait until fonts are loaded
   }
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack initialRouteName="splash">
-        <Stack.Screen name="splash" options={{ headerShown: false }} />
-  
+      <Stack>
+        {/* Removed splash, start directly with tabs */}
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       </Stack>
 
       <StatusBar style="auto" />

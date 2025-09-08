@@ -10,6 +10,89 @@ import {
 } from "react-native";
 import { useRoute, useNavigation, NavigationProp, RouteProp } from "@react-navigation/native";
 
+// Helper function to convert decimal to fraction - FIXED VERSION
+const decimalToFraction = (decimal: number): string => {
+  // Handle special cases
+  if (decimal === Infinity) return "∞";
+  if (decimal === -Infinity) return "-∞";
+  if (!Number.isFinite(decimal)) return "NaN";
+  if (decimal === 0) return "0";
+  
+  // Handle very small numbers that should be treated as zero
+  if (Math.abs(decimal) < 1e-10) return "0";
+  
+  // Handle negative numbers
+  const isNegative = decimal < 0;
+  const absDecimal = Math.abs(decimal);
+  
+  // If it's a whole number, return it directly
+  if (Math.abs(absDecimal - Math.round(absDecimal)) < 1e-10) {
+    return isNegative ? `-${Math.round(absDecimal)}` : `${Math.round(absDecimal)}`;
+  }
+  
+  // Convert to fraction using continued fractions algorithm
+  const tolerance = 1.0E-10;
+  let h1 = 1, h2 = 0, k1 = 0, k2 = 1;
+  let b = absDecimal;
+  let iterations = 0;
+  const maxIterations = 50; // Prevent infinite loops
+  
+  while (iterations < maxIterations) {
+    const a = Math.floor(b);
+    let aux = h1;
+    h1 = a * h1 + h2;
+    h2 = aux;
+    aux = k1;
+    k1 = a * k1 + k2;
+    k2 = aux;
+    
+    // Check if we've found a good approximation
+    if (k1 !== 0 && Math.abs(absDecimal - h1 / k1) <= absDecimal * tolerance) {
+      break;
+    }
+    
+    // Prepare for next iteration
+    if (Math.abs(b - a) < tolerance) break;
+    b = 1 / (b - a);
+    if (!Number.isFinite(b)) break;
+    iterations++;
+  }
+  
+  // Handle edge cases
+  if (k1 === 0 || !Number.isFinite(h1) || !Number.isFinite(k1)) {
+    // Fall back to decimal representation with limited precision
+    return parseFloat(decimal.toFixed(6)).toString();
+  }
+  
+  // Simplify the fraction if possible
+  const gcd = (a: number, b: number): number => {
+    a = Math.abs(a);
+    b = Math.abs(b);
+    while (b !== 0) {
+      const temp = b;
+      b = a % b;
+      a = temp;
+    }
+    return a;
+  };
+  
+  const divisor = gcd(Math.abs(h1), Math.abs(k1));
+  const numerator = Math.abs(h1) / divisor;
+  const denominator = Math.abs(k1) / divisor;
+  
+  // Format the result
+  if (denominator === 1) {
+    return isNegative ? `-${numerator}` : `${numerator}`;
+  }
+  
+  // Check if the fraction is too complex, if so return decimal
+  if (denominator > 10000 || numerator > 10000) {
+    return parseFloat(decimal.toFixed(6)).toString();
+  }
+  
+  return isNegative ? `-${numerator}/${denominator}` : `${numerator}/${denominator}`;
+};
+
 type RootStackParamList = {
   Home: undefined;
   NextComponent: { optimization: string; variables: string; constraints: string };
@@ -60,29 +143,34 @@ export default function SolutionPage() {
   const formatEquations = () => {
     const objectiveTerms = objective
       .map((coeff, index) => {
-        if (coeff === 0) return null;
+        if (Math.abs(coeff) < 1e-10) return null; // Treat very small numbers as zero
         const sign = coeff >= 0 ? "+" : "-";
         const absCoeff = Math.abs(coeff);
-        return `${sign} ${absCoeff !== 1 ? absCoeff : ""}x${index + 1}`;
+        const coeffStr = absCoeff === 1 ? "" : decimalToFraction(absCoeff);
+        return `${sign} ${coeffStr}x${index + 1}`;
       })
       .filter((t) => t !== null);
+    
     let objectiveStr = (objectiveTerms as string[]).join(" ");
     if (objectiveStr.startsWith("+ ")) objectiveStr = objectiveStr.substring(2);
+    if (objectiveStr === "") objectiveStr = "0"; // Handle case where all coefficients are zero
     const formattedObjective = `${optType === "Maximize" ? "Maximize" : "Minimize"} Z = ${objectiveStr}`;
 
     const constraintEquations = constraintsMatrix.map((constraint, rowIndex) => {
       const constraintTerms = constraint
         .map((coeff, index) => {
-          if (coeff === 0) return null;
+          if (Math.abs(coeff) < 1e-10) return null; // Treat very small numbers as zero
           const sign = coeff >= 0 ? "+" : "-";
           const absCoeff = Math.abs(coeff);
-          return `${sign} ${absCoeff !== 1 ? absCoeff : ""}x${index + 1}`;
+          const coeffStr = absCoeff === 1 ? "" : decimalToFraction(absCoeff);
+          return `${sign} ${coeffStr}x${index + 1}`;
         })
         .filter((t) => t !== null) as string[];
 
       let constraintStr = constraintTerms.join(" ");
       if (constraintStr.startsWith("+ ")) constraintStr = constraintStr.substring(2);
-      return `${constraintStr} ≤ ${rhs[rowIndex]}`;
+      if (constraintStr === "") constraintStr = "0"; // Handle case where all coefficients are zero
+      return `${constraintStr} ≤ ${decimalToFraction(rhs[rowIndex])}`;
     });
 
     const nonNegativityConstraints = objective.map((_, index) => `x${index + 1} ≥ 0`);
@@ -189,6 +277,12 @@ export default function SolutionPage() {
       }
     }
 
+    // Clean up very small numbers that should be zero
+    for (let j = 0; j < cols; j++) {
+      if (Math.abs(zjRow[j]) < 1e-10) zjRow[j] = 0;
+      if (Math.abs(cjZjRow[j]) < 1e-10) cjZjRow[j] = 0;
+    }
+
     // place rows back
     const newTable = table.slice(0, rowsCount).map((r) => r.slice());
     newTable.push(zjRow);
@@ -197,7 +291,7 @@ export default function SolutionPage() {
     // determine entering variable: choose max positive Cj-Zj among variable columns (exclude RHS)
     const cjZjVars = cjZjRow.slice(0, allVars.length);
     const maxVal = Math.max(...cjZjVars);
-    if (maxVal <= 0) {
+    if (maxVal <= 1e-10) { // Use small epsilon instead of exact 0
       // already optimal
       return { table: newTable, enteringVar: null as string | null, leavingVar: null as string | null };
     }
@@ -210,9 +304,9 @@ export default function SolutionPage() {
     for (let i = 0; i < rowsCount; i++) {
       const colVal = newTable[i][enteringIndex];
       const rhsVal = newTable[i][newTable[i].length - 1];
-      if (colVal > 0) {
+      if (colVal > 1e-10) { // Use small epsilon instead of exact 0
         const ratio = rhsVal / colVal;
-        if (ratio < minRatio - 1e-9) {
+        if (ratio >= -1e-10 && ratio < minRatio - 1e-10) { // Ensure non-negative ratio
           minRatio = ratio;
           leavingIdx = i;
         }
@@ -229,14 +323,17 @@ export default function SolutionPage() {
     const cols = table[0].length;
     const pivotVal = table[pivotRowIdx][pivotColIdx];
 
-    if (pivotVal === 0) {
-      // shouldn't happen if chosen correctly, but guard
-      throw new Error("Pivot value is zero.");
+    if (Math.abs(pivotVal) < 1e-12) {
+      throw new Error("Pivot value is too close to zero.");
     }
 
     // normalize pivot row
     for (let j = 0; j < cols; j++) {
       table[pivotRowIdx][j] = table[pivotRowIdx][j] / pivotVal;
+      // Clean up very small numbers
+      if (Math.abs(table[pivotRowIdx][j]) < 1e-12) {
+        table[pivotRowIdx][j] = 0;
+      }
     }
 
     // eliminate other rows
@@ -246,6 +343,10 @@ export default function SolutionPage() {
       if (Math.abs(factor) < 1e-12) continue;
       for (let j = 0; j < cols; j++) {
         table[i][j] = table[i][j] - factor * table[pivotRowIdx][j];
+        // Clean up very small numbers
+        if (Math.abs(table[i][j]) < 1e-12) {
+          table[i][j] = 0;
+        }
       }
     }
 
@@ -263,7 +364,7 @@ export default function SolutionPage() {
 
     // Check optimality
     const maxVal = Math.max(...cjZjVars);
-    if (maxVal <= 0) {
+    if (maxVal <= 1e-10) { // Use small epsilon
       setEnteringVar(null);
       setLeavingVar(null);
       setMessage("Optimal solution reached.");
@@ -279,9 +380,9 @@ export default function SolutionPage() {
     for (let i = 0; i < rowsCount; i++) {
       const colVal = simplexTable[i][enteringIndex];
       const rhsVal = simplexTable[i][cols - 1];
-      if (colVal > 0) {
+      if (colVal > 1e-10) { // Use small epsilon
         const ratio = rhsVal / colVal;
-        if (ratio < minRatio - 1e-9) {
+        if (ratio >= -1e-10 && ratio < minRatio - 1e-10) {
           minRatio = ratio;
           leavingRowIdx = i;
         }
@@ -316,7 +417,7 @@ export default function SolutionPage() {
       // check if now optimal
       const cjZjNow = computed.table[computed.table.length - 1].slice(0, variables.length);
       const maxNow = Math.max(...cjZjNow);
-      if (maxNow <= 0) {
+      if (maxNow <= 1e-10) { // Use small epsilon
         setMessage("Optimal solution reached.");
         setEnteringVar(null);
         setLeavingVar(null);
@@ -345,85 +446,81 @@ export default function SolutionPage() {
     setLeavingVar(computed.leavingVar ?? null);
   };
 
-  // Solve to optimal automatically (synchronous loop). Has a safety limit to avoid infinite loops.
+  // Solve to optimal automatically with proper state management
   const handleSolveToOptimal = () => {
     setMessage(null);
-    let safety = 0;
-    const maxIterations = 100; // safety cap
-    while (true) {
-      safety++;
-      if (safety > maxIterations) {
+    
+    const solve = (currentTable: number[][], currentBasics: string[], currentIteration: number): void => {
+      const maxIterations = 100;
+      
+      if (currentIteration > maxIterations) {
         setMessage("Stopped: reached maximum automatic iterations limit.");
-        break;
+        return;
       }
-      // check optimality
-      const lastRow = simplexTable[simplexTable.length - 1] ?? [];
+      
+      // Check optimality
+      const lastRow = currentTable[currentTable.length - 1] ?? [];
       const cjZjVars = lastRow.slice(0, variables.length);
       const maxVal = cjZjVars.length ? Math.max(...cjZjVars) : -Infinity;
-      if (maxVal <= 0) {
+      
+      if (maxVal <= 1e-10) {
         setMessage("Optimal solution reached.");
         setEnteringVar(null);
         setLeavingVar(null);
-        break;
+        return;
       }
-      // determine entering column
+      
+      // Determine entering column
       const enteringIndex = cjZjVars.indexOf(maxVal);
-      // ratio test
+      
+      // Ratio test
       let minRatio = Infinity;
       let leavingRowIdx = -1;
-      const rowsCount = simplexTable.length - 2;
-      const cols = simplexTable[0].length;
+      const rowsCount = currentTable.length - 2;
+      const cols = currentTable[0].length;
+      
       for (let i = 0; i < rowsCount; i++) {
-        const colVal = simplexTable[i][enteringIndex];
-        const rhsVal = simplexTable[i][cols - 1];
-        if (colVal > 0) {
+        const colVal = currentTable[i][enteringIndex];
+        const rhsVal = currentTable[i][cols - 1];
+        if (colVal > 1e-10) {
           const ratio = rhsVal / colVal;
-          if (ratio < minRatio - 1e-9) {
+          if (ratio >= -1e-10 && ratio < minRatio - 1e-10) {
             minRatio = ratio;
             leavingRowIdx = i;
           }
         }
       }
+      
       if (leavingRowIdx === -1) {
         setMessage("Problem is unbounded (no valid leaving variable).");
         setEnteringVar(variables[enteringIndex]);
         setLeavingVar(null);
-        break;
+        return;
       }
 
-      // pivot
+      // Pivot
       try {
-        const newTable = performPivot(simplexTable, leavingRowIdx, enteringIndex);
-        const newBasics = basicVariables.slice();
+        const newTable = performPivot(currentTable, leavingRowIdx, enteringIndex);
+        const newBasics = currentBasics.slice();
         newBasics[leavingRowIdx] = variables[enteringIndex];
         const computed = computeZjAndCjMinusZj(newTable, newBasics, cj, variables);
 
+        // Update state
         setSimplexTable(computed.table);
         setBasicVariables(newBasics);
-        setIteration((prev) => prev + 1);
+        setIteration(currentIteration + 1);
 
-        // continue loop (the while will re-evaluate table)
-        // since state updates are async in React, we also mutate local references for loop
-        // to avoid stale reads, overwrite simplexTable and basicVariables local references:
-        // But since we can't read updated state synchronously, we update local variables used by loop:
-        // Instead of relying on state, work with local copies for loop:
-        // To keep things simple and synchronous here, break the loop and call next iteration by recursion:
-        // However user wanted it to run until optimal — we'll simulate synchronous updates by reassigning local copies.
-        // For simplicity we update local copies and continue the while using them:
-        // (This block below mirrors setState effects into local variables.)
-        (function updateLocalStateMirror() {
-          // override local references for next iteration
-          // @ts-ignore
-          simplexTable = computed.table;
-          // @ts-ignore
-          basicVariables = newBasics;
-        })();
-        continue;
+        // Continue solving recursively with a small delay to allow state updates
+        setTimeout(() => {
+          solve(computed.table, newBasics, currentIteration + 1);
+        }, 100);
+        
       } catch (err) {
         setMessage("Error during automatic pivot: " + (err as Error).message);
-        break;
       }
-    }
+    };
+
+    solve(simplexTable, basicVariables, iteration);
   };
 
   const renderSimplexTable = () => {
@@ -447,7 +544,7 @@ export default function SolutionPage() {
               </View>
               {cj.map((value, index) => (
                 <View key={index} style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                  <Text style={styles.headerText}>{value}</Text>
+                  <Text style={styles.headerText}>{decimalToFraction(value)}</Text>
                 </View>
               ))}
               <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
@@ -484,13 +581,15 @@ export default function SolutionPage() {
                   {
                     (() => {
                       const idx = variables.indexOf(basicVariables[rowIndex]);
-                      return <Text style={styles.cellText}>{idx === -1 ? 0 : cj[idx].toFixed(2)}</Text>;
+                      return <Text style={styles.cellText}>{idx === -1 ? "0" : decimalToFraction(cj[idx])}</Text>;
                     })()
                   }
                 </View>
                 {row.map((value, colIndex) => (
                   <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
-                    <Text style={styles.cellText}>{Number.isFinite(value) ? value.toFixed(2) : String(value)}</Text>
+                    <Text style={styles.cellText}>
+                      {decimalToFraction(value)}
+                    </Text>
                   </View>
                 ))}
               </View>
@@ -506,7 +605,9 @@ export default function SolutionPage() {
               </View>
               {simplexTable[simplexTable.length - 2].map((value, colIndex) => (
                 <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
-                  <Text style={styles.cellText}>{value.toFixed(2)}</Text>
+                  <Text style={styles.cellText}>
+                    {decimalToFraction(value)}
+                  </Text>
                 </View>
               ))}
             </View>
@@ -521,7 +622,9 @@ export default function SolutionPage() {
               </View>
               {simplexTable[simplexTable.length - 1].map((value, colIndex) => (
                 <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
-                  <Text style={[styles.cellText, value < 0 && styles.negativeValue]}>{value.toFixed(2)}</Text>
+                  <Text style={[styles.cellText, value < -1e-10 && styles.negativeValue]}>
+                    {decimalToFraction(value)}
+                  </Text>
                 </View>
               ))}
             </View>
@@ -598,7 +701,7 @@ const styles = StyleSheet.create({
   subHeading: { color: "#fff", fontSize: 18, fontWeight: "bold", marginBottom: 10, marginTop: 15, textAlign: "center" },
   equationsContainer: { backgroundColor: "rgba(255, 255, 255, 0.1)", padding: 15, borderRadius: 8, marginBottom: 20 },
   equationText: { color: "#fff", fontSize: 16, marginBottom: 8, fontStyle: "italic" },
-  tableContainer: { borderWidth: 1, borderColor: "#fff", borderRadius: 8, marginBottom: 20, maxHeight: 400 },
+  tableContainer: { borderWidth: 1, borderColor: "#fff", borderRadius: 8, marginBottom: 20, minHeight: 200 },
   row: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: "#fff" },
   cjRow: { backgroundColor: "rgba(255, 165, 0, 0.3)" },
   headerRow: { backgroundColor: "rgba(255, 255, 255, 0.2)" },

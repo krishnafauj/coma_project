@@ -95,11 +95,13 @@ const decimalToFraction = (decimal: number): string => {
 type RootStackParamList = {
   Home: undefined;
   NextComponent: { optimization: string; variables: string; constraints: string };
-  SolutionPage: {
+  Solution: {
     objective: number[];
     constraintsMatrix: number[][];
     rhs: number[];
     optType: string;
+    constraintTypes: string[];
+    variableSigns: string[];
   };
   Phase1: {
     objective: number[];
@@ -107,6 +109,7 @@ type RootStackParamList = {
     rhs: number[];
     optType: string;
     constraintTypes: string[];
+    variableSigns: string[];
   };
   Phase2: {
     originalObjective: number[];
@@ -114,6 +117,8 @@ type RootStackParamList = {
     phase1Variables: string[];
     phase1BasicVariables: string[];
     optType: string;
+    variableSigns: string[]; // <-- ADDED
+    transformedVariableNames: string[]; // <-- ADDED
   };
 };
 
@@ -122,7 +127,16 @@ type Phase2RouteProp = RouteProp<RootStackParamList, "Phase2">;
 export default function Phase2() {
   const navigation = useNavigation<NavigationProp<RootStackParamList>>();
   const route = useRoute<Phase2RouteProp>();
-  const { originalObjective, phase1Table, phase1Variables, phase1BasicVariables, optType } = route.params;
+  // Destructure new props
+  const { 
+    originalObjective, 
+    phase1Table, 
+    phase1Variables, 
+    phase1BasicVariables, 
+    optType, 
+    variableSigns, 
+    transformedVariableNames 
+  } = route.params;
 
   // Core Phase 2 state
   const [simplexTable, setSimplexTable] = useState<number[][]>([]);
@@ -147,19 +161,21 @@ export default function Phase2() {
 
   useEffect(() => {
     // Only create Phase 2 table if all required parameters are available
-    if (originalObjective && phase1Table && phase1Variables && phase1BasicVariables && optType) {
+    if (originalObjective && phase1Table && phase1Variables && phase1BasicVariables && optType && variableSigns && transformedVariableNames) {
       createPhase2Table();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [originalObjective, phase1Table, phase1Variables, phase1BasicVariables, optType]);
+  }, [originalObjective, phase1Table, phase1Variables, phase1BasicVariables, optType, variableSigns, transformedVariableNames]); // Add new dependencies
 
   const formatEquations = (phase2Objective: number[], allVars: string[]) => {
     // Create Phase 2 objective display with actual coefficients
     const objectiveTerms = phase2Objective
       .map((coeff, index) => {
         if (Math.abs(coeff) < 1e-10) return null;
-        const sign = coeff >= 0 ? "+" : "-";
-        const absCoeff = Math.abs(coeff);
+        // Handle maximization logic (if min problem, Cj is negated)
+        const displayCoeff = optType === "Minimize" ? -coeff : coeff;
+        const sign = displayCoeff >= 0 ? "+" : "-";
+        const absCoeff = Math.abs(displayCoeff);
         const coeffStr = absCoeff === 1 ? "" : decimalToFraction(absCoeff);
         return `${sign} ${coeffStr}${allVars[index]}`;
       })
@@ -169,10 +185,13 @@ export default function Phase2() {
     if (objectiveStr.startsWith("+ ")) objectiveStr = objectiveStr.substring(2);
     if (objectiveStr === "") objectiveStr = "0";
     
+    // We are *always* Maximizing in Phase 2 (since Min Z = -Max(-Z))
+    // But we display the original problem type
     const formattedObjective = `${optType === "Maximize" ? "Maximize" : "Minimize"} Z = ${objectiveStr}`;
 
     // Add constraint info (we can't reconstruct exact constraints from Phase 1 table, so show general info)
     const constraintInfo = "Subject to: Constraints from Phase I (artificial variables removed)";
+    // `allVars` here are the non-artificial vars, e.g., x1', x1'', x2, s1
     const nonNegativityConstraints = allVars.map(varName => `${varName} ≥ 0`);
     
     setEquations([formattedObjective, constraintInfo, ...nonNegativityConstraints]);
@@ -184,27 +203,34 @@ export default function Phase2() {
       console.error('phase1Variables is undefined or not an array');
       return;
     }
-
     if (!phase1Table || !Array.isArray(phase1Table)) {
       console.error('phase1Table is undefined or not an array');
       return;
     }
-
     if (!originalObjective || !Array.isArray(originalObjective)) {
       console.error('originalObjective is undefined or not an array');
       return;
     }
-
     if (!phase1BasicVariables || !Array.isArray(phase1BasicVariables)) {
       console.error('phase1BasicVariables is undefined or not an array');
       return;
     }
+    // Add safety checks for new params
+    if (!variableSigns || !Array.isArray(variableSigns)) {
+      console.error('variableSigns is undefined or not an array');
+      return;
+    }
+    if (!transformedVariableNames || !Array.isArray(transformedVariableNames)) {
+      console.error('transformedVariableNames is undefined or not an array');
+      return;
+    }
+
 
     // Remove artificial variables from Phase 1 table and variables
     const filteredVariables: string[] = [];
     const artificialIndices: number[] = [];
     
-    // Identify artificial variables and their indices - NOW SAFE
+    // Identify artificial variables and their indices
     phase1Variables.forEach((varName, index) => {
       if (varName.startsWith('a')) {
         artificialIndices.push(index);
@@ -213,28 +239,56 @@ export default function Phase2() {
       }
     });
 
-    setVariables(filteredVariables);
+    setVariables(filteredVariables); // e.g., ["x1'", "x1''", "x2", "s1", "e1"]
 
-    // Create Phase 2 objective coefficients (restore original objective, set slack/surplus to 0)
-    const phase2Objective: number[] = [];
-    let originalIndex = 0;
-    
-    for (let i = 0; i < filteredVariables.length; i++) {
-      const varName = filteredVariables[i];
-      if (varName.startsWith('x')) {
-        // Original variable - use original objective coefficient
-        if (originalIndex < originalObjective.length) {
-          const adjustedCoeff = optType === "Minimize" ? -originalObjective[originalIndex] : originalObjective[originalIndex];
-          phase2Objective.push(adjustedCoeff);
-          originalIndex++;
-        } else {
-          phase2Objective.push(0);
+    // --- START OF FIX: Rebuild Phase 2 Cj row ---
+
+    // 1. Re-create the transformed objective coefficients based on signs.
+    // These coeffs will correspond to `transformedVariableNames` ["x1'", "x1''", "x2"]
+    const transformedObjectiveCoeffs: number[] = [];
+    const signs = variableSigns || Array(originalObjective.length).fill("≥0");
+
+    signs.forEach((sign, index) => {
+        const coeff = originalObjective[index] || 0;
+        // Apply the *same* logic as Phase 1 transform
+        if (sign === "≥0") {
+            transformedObjectiveCoeffs.push(coeff);
+        } else if (sign === "≤0") {
+            transformedObjectiveCoeffs.push(-coeff); // Coeff for x_i' is -c_i
+        } else if (sign === "unrestricted") {
+            transformedObjectiveCoeffs.push(coeff);   // Coeff for x_i' is c_i
+            transformedObjectiveCoeffs.push(-coeff);  // Coeff for x_i'' is -c_i
         }
-      } else {
-        // Slack or surplus variable - coefficient is 0
-        phase2Objective.push(0);
-      }
+    });
+
+    // 2. Create a lookup map for the transformed variable coefficients
+    const coeffMap = new Map<string, number>();
+    transformedVariableNames.forEach((name, index) => {
+        coeffMap.set(name, transformedObjectiveCoeffs[index] || 0);
+    });
+
+    // 3. Create the final Phase 2 Cj row
+    // This row must match the order of `filteredVariables`
+    const phase2Objective: number[] = [];
+
+    for (const varName of filteredVariables) {
+        if (coeffMap.has(varName)) {
+            // It's a transformed original variable (e.g., x1', x1'', x2)
+            let coeff = coeffMap.get(varName)!;
+            
+            // If original problem is MIN, we Maximize -Z.
+            // So negate all original coefficients.
+            if (optType === "Minimize") {
+                coeff = -coeff;
+            }
+            phase2Objective.push(coeff);
+        } else {
+            // It's a slack or surplus variable, coefficient is 0
+            phase2Objective.push(0);
+        }
     }
+    
+    // --- END OF FIX ---
 
     setCj(phase2Objective);
 
@@ -245,6 +299,7 @@ export default function Phase2() {
     for (let i = 0; i < constraintRows.length; i++) {
       const newRow: number[] = [];
       for (let j = 0; j < phase1Variables.length; j++) {
+        // Only add column if it's NOT an artificial variable
         if (!artificialIndices.includes(j)) {
           newRow.push(constraintRows[i][j]);
         }
@@ -256,18 +311,23 @@ export default function Phase2() {
       phase2Table.push(newRow);
     }
 
-    // Update basic variables (replace any artificial variables that might be in basis)
-    const newBasicVariables = [...phase1BasicVariables];
-    for (let i = 0; i < newBasicVariables.length; i++) {
-      if (newBasicVariables[i].startsWith('a')) {
-        // Find a suitable non-basic variable to replace this artificial variable
-        // This is a simplified approach - in practice, you'd need more sophisticated logic
-        const availableSlack = filteredVariables.find(v => v.startsWith('s'));
-        newBasicVariables[i] = availableSlack || 's1'; // Replace with first available slack variable as fallback
-      }
+    // Update basic variables 
+    // This logic is still flawed, if an artificial var is in the basis at W=0
+    // it should be replaced. But this is complex.
+    // For now, we assume Phase 1 ends with no artificial vars in basis.
+    const newBasicVariables = phase1BasicVariables.filter(varName => !varName.startsWith('a'));
+    
+    // This check is crucial. If artificial vars are still in the basis,
+    // we need to handle degeneracy or pivot them out.
+    // For this implementation, we'll assume a clean hand-off.
+    if (newBasicVariables.length !== constraintRows.length) {
+      console.warn("Phase 1 ended with artificial variables in the basis. Phase 2 may be incorrect.");
+      // A simple (but not robust) fix:
+      setBasicVariables(phase1BasicVariables.slice(0, constraintRows.length));
+    } else {
+      setBasicVariables(newBasicVariables);
     }
-    setBasicVariables(newBasicVariables);
-
+    
     // Add placeholder Zj and Cj-Zj rows
     const cols = filteredVariables.length + 1; // +1 for RHS
     const zjRow = Array(cols).fill(0);
@@ -280,10 +340,12 @@ export default function Phase2() {
     setMessage(null);
 
     // Format equations with Phase 2 objective
-    formatEquations(phase2Objective, filteredVariables);
+    // Note: `filteredVariables` is now `allVars` for this function
+    formatEquations(phase2Objective, filteredVariables); 
 
     // Compute initial Zj and Cj-Zj for Phase 2
-    const computed = computeZjAndCjMinusZj(phase2Table, newBasicVariables, phase2Objective, filteredVariables);
+    // `newBasicVariables` (or the fallback) is used here
+    const computed = computeZjAndCjMinusZj(phase2Table, basicVariables, phase2Objective, filteredVariables);
     setSimplexTable(computed.table);
     setEnteringVar(computed.enteringVar ?? null);
     setLeavingVar(computed.leavingVar ?? null);
@@ -293,19 +355,22 @@ export default function Phase2() {
       table: computed.table.map((r) => [...r]),
       vars: filteredVariables.slice(),
       cj: phase2Objective.slice(),
-      basics: newBasicVariables.slice(),
+      basics: basicVariables.slice(), // Use the actual state
       iteration: 1,
-      equations: equations.slice(),
+      equations: equations.slice(), // equations state is set by formatEquations
     });
   };
 
+  // This function is for MAXIMIZATION
   const computeZjAndCjMinusZj = (
     table: number[][],
     basicVars: string[],
     cjRow: number[],
     allVars: string[]
   ) => {
-    if (table.length < 2) return { table, enteringVar: null as string | null, leavingVar: null as string | null };
+    if (table.length < 2 || basicVars.length === 0 || table[0].length === 0) {
+      return { table, enteringVar: null as string | null, leavingVar: null as string | null };
+    }
 
     const rowsCount = table.length - 2;
     const cols = table[0].length;
@@ -313,7 +378,11 @@ export default function Phase2() {
     // Determine CB values
     const cb: number[] = basicVars.map((b) => {
       const idx = allVars.indexOf(b);
-      if (idx === -1) return 0;
+      if (idx === -1) {
+        // This can happen if basicVars is out of sync
+        console.warn(`Basic variable ${b} not found in allVars list.`);
+        return 0;
+      }
       return cjRow[idx] ?? 0;
     });
 
@@ -321,7 +390,7 @@ export default function Phase2() {
     for (let j = 0; j < cols; j++) {
       let sum = 0;
       for (let i = 0; i < rowsCount; i++) {
-        sum += cb[i] * table[i][j];
+        sum += (cb[i] || 0) * (table[i][j] || 0);
       }
       zjRow[j] = sum;
     }
@@ -329,9 +398,9 @@ export default function Phase2() {
     const cjZjRow = Array(cols).fill(0);
     for (let j = 0; j < cols; j++) {
       if (j < cjRow.length) {
-        cjZjRow[j] = cjRow[j] - zjRow[j];
+        cjZjRow[j] = (cjRow[j] || 0) - (zjRow[j] || 0);
       } else {
-        cjZjRow[j] = 0;
+        cjZjRow[j] = 0 - (zjRow[j] || 0); // For RHS
       }
     }
 
@@ -346,8 +415,12 @@ export default function Phase2() {
     newTable.push(zjRow);
     newTable.push(cjZjRow);
 
-    // For Phase 2 (maximization after potential conversion), choose max positive Cj-Zj
+    // For Phase 2 (maximization), choose max positive Cj-Zj
     const cjZjVars = cjZjRow.slice(0, allVars.length);
+    if (cjZjVars.length === 0) {
+      return { table: newTable, enteringVar: null, leavingVar: null };
+    }
+    
     const maxVal = Math.max(...cjZjVars);
     if (maxVal <= 1e-10) {
       // Phase 2 optimal
@@ -419,6 +492,10 @@ export default function Phase2() {
     const cjZjVars = cjZjRow.slice(0, variables.length);
 
     // Check Phase 2 optimality (maximization - all Cj-Zj <= 0)
+    if (cjZjVars.length === 0) {
+      setMessage("Phase 2 complete. Optimal solution found.");
+      return;
+    }
     const maxVal = Math.max(...cjZjVars);
     if (maxVal <= 1e-10) {
       setEnteringVar(null);

@@ -95,11 +95,13 @@ const decimalToFraction = (decimal: number): string => {
 type RootStackParamList = {
     Home: undefined;
     NextComponent: { optimization: string; variables: string; constraints: string };
-    SolutionPage: {
+    Solution: {
         objective: number[];
         constraintsMatrix: number[][];
         rhs: number[];
         optType: string;
+        constraintTypes: string[];
+        variableSigns: string[];
     };
     Phase1: {
         objective: number[];
@@ -107,6 +109,7 @@ type RootStackParamList = {
         rhs: number[];
         optType: string;
         constraintTypes: string[];
+        variableSigns: string[]; // <-- ADDED
     };
     Phase2: {
         originalObjective: number[];
@@ -114,6 +117,8 @@ type RootStackParamList = {
         phase1Variables: string[];
         phase1BasicVariables: string[];
         optType: string;
+        variableSigns: string[]; // <-- ADDED
+        transformedVariableNames: string[]; // <-- ADDED
     };
 };
 
@@ -123,7 +128,8 @@ type Phase1RouteProp = RouteProp<RootStackParamList, "Phase1">;
 export default function Phase1() {
     const navigation = useNavigation<NavigationProp<RootStackParamList>>();
     const route = useRoute<Phase1RouteProp>();
-    const { objective, constraintsMatrix, rhs, optType, constraintTypes } = route.params;
+    // Destructure the new prop
+    const { objective, constraintsMatrix, rhs, optType, constraintTypes, variableSigns } = route.params;
 
     // Core Phase 1 state - SAME STRUCTURE AS SOLUTION.TSX
     const [simplexTable, setSimplexTable] = useState<number[][]>([]);
@@ -137,6 +143,12 @@ export default function Phase1() {
     const [message, setMessage] = useState<string | null>(null);
     const [phase1Complete, setPhase1Complete] = useState<boolean>(false);
 
+    // --- NEW STATE ---
+    // Store the *new* variable names (e.g., x1', x1'', x2)
+    const [transformedVariableNames, setTransformedVariableNames] = useState<string[]>([]);
+    // Store the *original* objective for passing to Phase 2
+    const [originalObjectiveProp, setOriginalObjectiveProp] = useState<number[]>([]);
+
     // Store initial copies for reset
     const [initialState, setInitialState] = useState<{
         table: number[][];
@@ -147,12 +159,73 @@ export default function Phase1() {
         equations: string[];
     } | null>(null);
 
+    // --- NEW FUNCTION: To transform variables ---
+    const transformVariables = (
+        originalObjective: number[],
+        originalConstraints: number[][],
+        originalSigns: string[]
+    ) => {
+        let newObjective: number[] = [];
+        let newConstraintsMatrix: number[][] = Array.from({ length: originalConstraints.length }, () => []);
+        let newVariableNames: string[] = [];
+
+        originalSigns.forEach((sign, index) => {
+            const varName = `x${index + 1}`;
+            const objectiveCoeff = originalObjective[index] || 0;
+
+            if (sign === "≥0") {
+                // No change
+                newObjective.push(objectiveCoeff);
+                newVariableNames.push(varName);
+                originalConstraints.forEach((row, rIndex) => {
+                    newConstraintsMatrix[rIndex].push(row[index] || 0);
+                });
+            } else if (sign === "≤0") {
+                // Substitute x_i = -x_i'
+                const newVarName = `${varName}'`;
+                newObjective.push(-objectiveCoeff); // Coeff in objective becomes -coeff
+                newVariableNames.push(newVarName);
+                originalConstraints.forEach((row, rIndex) => {
+                    newConstraintsMatrix[rIndex].push(-(row[index] || 0)); // Coeff in constraint becomes -coeff
+                });
+            } else if (sign === "unrestricted") {
+                // Substitute x_i = x_i' - x_i''
+                const newVarName1 = `${varName}'`;
+                const newVarName2 = `${varName}''`;
+
+                // Add x_i'
+                newObjective.push(objectiveCoeff);
+                newVariableNames.push(newVarName1);
+                originalConstraints.forEach((row, rIndex) => {
+                    newConstraintsMatrix[rIndex].push(row[index] || 0);
+                });
+
+                // Add x_i''
+                newObjective.push(-objectiveCoeff); // Coeff for x_i'' is negative of original
+                newVariableNames.push(newVarName2);
+                originalConstraints.forEach((row, rIndex) => {
+                    newConstraintsMatrix[rIndex].push(-(row[index] || 0)); // Coeff for x_i'' is negative of original
+                });
+            }
+        });
+
+        return { newObjective, newConstraintsMatrix, newVariableNames };
+    };
+
+
     useEffect(() => {
+        // Store the original objective *before* it gets transformed
+        setOriginalObjectiveProp(objective);
         createInitialPhase1Table();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [objective, constraintsMatrix, rhs, optType, constraintTypes]);
+    }, [objective, constraintsMatrix, rhs, optType, constraintTypes, variableSigns]); // Add variableSigns
 
-    const formatEquations = (phase1Objective: number[], allVars: string[]) => {
+    // MODIFIED: To accept transformedConstraints and use new variable names
+    const formatEquations = (
+        phase1Objective: number[], 
+        allVars: string[], 
+        transformedConstraints: number[][]
+    ) => {
         // Create Phase 1 objective display showing the actual coefficients
         const objectiveTerms = phase1Objective
             .map((coeff, index) => {
@@ -170,14 +243,16 @@ export default function Phase1() {
 
         const formattedObjective = `Minimize W = ${objectiveStr}`;
 
-        const constraintEquations = constraintsMatrix.map((constraint, rowIndex) => {
+        // Use the transformed constraints matrix for display
+        const constraintEquations = transformedConstraints.map((constraint, rowIndex) => {
             const constraintTerms = constraint
-                .map((coeff, index) => {
+                .map((coeff, index) => { // Index now maps to transformedVariableNames
                     if (Math.abs(coeff) < 1e-10) return null;
                     const sign = coeff >= 0 ? "+" : "-";
                     const absCoeff = Math.abs(coeff);
                     const coeffStr = absCoeff === 1 ? "" : decimalToFraction(absCoeff);
-                    return `${sign} ${coeffStr}x${index + 1}`;
+                    // Use the correct transformed variable name
+                    return `${sign} ${coeffStr}${transformedVariableNames[index]}`;
                 })
                 .filter((t) => t !== null);
 
@@ -187,15 +262,33 @@ export default function Phase1() {
             return `${constraintStr} ${constraintTypes[rowIndex]} ${decimalToFraction(rhs[rowIndex])}`;
         });
 
-        const nonNegativityConstraints = objective.map((_, index) => `x${index + 1} ≥ 0`);
+        // This is now correct as `allVars` includes transformed names, slack, surplus, etc.
         const allVariableConstraints = allVars.map(varName => `${varName} ≥ 0`);
 
         setEquations([formattedObjective, ...constraintEquations, ...allVariableConstraints]);
     };
 
     const createInitialPhase1Table = () => {
-        const numOriginalVars = objective.length;
-        const numConstraints = constraintsMatrix.length;
+        
+        // --- START OF FIX ---
+        // 1. Perform variable transformations FIRST
+        // Use a default `variableSigns` if not provided, to maintain old functionality
+        const signs = variableSigns || Array(objective.length).fill("≥0");
+
+        const { 
+            newObjective, // This is the transformed *original* objective, not used for Phase 1 Cj
+            newConstraintsMatrix: transformedConstraints, 
+            newVariableNames 
+        } = transformVariables(objective, constraintsMatrix, signs);
+        
+        // Store the new variable names for use in other functions (like formatEquations)
+        setTransformedVariableNames(newVariableNames);
+        
+        // 2. Use transformed data for the rest of the function
+        const numTransformedVars = newVariableNames.length; 
+        const numConstraints = transformedConstraints.length; // Use transformedConstraints
+        // --- END OF FIX ---
+
 
         // Count slack, surplus, and artificial variables needed
         let slackCount = 0;
@@ -209,7 +302,8 @@ export default function Phase1() {
         });
 
         // Create variable names
-        const originalVars = Array.from({ length: numOriginalVars }, (_, i) => `x${i + 1}`);
+        // MODIFIED: Use the new transformed names
+        const originalVars = newVariableNames; 
         const slackVars = Array.from({ length: slackCount }, (_, i) => `s${i + 1}`);
         const surplusVars = Array.from({ length: surplusCount }, (_, i) => `e${i + 1}`);
         const artificialVars = Array.from({ length: artificialCount }, (_, i) => `a${i + 1}`);
@@ -218,9 +312,9 @@ export default function Phase1() {
 
         // Create Phase 1 objective: minimize sum of artificial variables
         const phase1Objective = [
-            ...Array(numOriginalVars).fill(0),  // original variables have 0 coefficient
-            ...Array(slackCount + surplusCount).fill(0),  // slack and surplus have 0 coefficient
-            ...Array(artificialCount).fill(1)   // artificial variables have coefficient 1
+            ...Array(numTransformedVars).fill(0),  // MODIFIED: use numTransformedVars
+            ...Array(slackCount + surplusCount).fill(0),  
+            ...Array(artificialCount).fill(1)   
         ];
         setCj(phase1Objective);
 
@@ -232,7 +326,8 @@ export default function Phase1() {
         let artificialIndex = 0;
 
         for (let i = 0; i < numConstraints; i++) {
-            const row = [...constraintsMatrix[i]];
+            // MODIFIED: Use transformedConstraints
+            const row = [...transformedConstraints[i]];
 
             // Add slack variables columns
             for (let j = 0; j < slackCount; j++) {
@@ -298,7 +393,8 @@ export default function Phase1() {
         setPhase1Complete(false);
 
         // Format equations with the actual Phase 1 objective
-        formatEquations(phase1Objective, allVars);
+        // MODIFIED: Pass transformedConstraints
+        formatEquations(phase1Objective, allVars, transformedConstraints);
 
         // Compute initial Zj and Cj-Zj for Phase 1
         const computed = computeZjAndCjMinusZj(newSimplexTable, newBasicVariables, phase1Objective, allVars);
@@ -313,7 +409,7 @@ export default function Phase1() {
             cj: phase1Objective.slice(),
             basics: newBasicVariables.slice(),
             iteration: 1,
-            equations: equations.slice(),
+            equations: equations.slice(), // equations state is now set correctly
         });
     };
 
@@ -611,34 +707,19 @@ export default function Phase1() {
         solve(simplexTable, basicVariables, iteration);
     };
 
+    // MODIFIED: Pass new parameters to Phase 2
     const handleProceedToPhase2 = () => {
         if (!phase1Complete) return;
 
-        // Prepare Phase 2 data by removing artificial variables and restoring original objective
-        const numOriginalVars = objective.length;
-        const phase2ConstraintsMatrix: number[][] = [];
-        const phase2RHS: number[] = [];
-
-        // Extract only original variable columns and RHS from current Phase 1 table
-        const currentTable = simplexTable.slice(0, -2); // Remove Zj and Cj-Zj rows
-
-        for (let i = 0; i < currentTable.length; i++) {
-            const row = [];
-            // Take only original variable columns
-            for (let j = 0; j < numOriginalVars; j++) {
-                row.push(currentTable[i][j]);
-            }
-            phase2ConstraintsMatrix.push(row);
-            phase2RHS.push(currentTable[i][currentTable[i].length - 1]); // RHS
-        }
-
         // Navigate to SolutionPage with Phase 2 data
         navigation.navigate("Phase2", {
-            originalObjective: objective, // Original objective coefficients
-            phase1Table: simplexTable, // Current Phase 1 simplex table (including Zj and Cj-Zj rows)
-            phase1Variables: variables, // All variables from Phase 1 (including artificial variables)
-            phase1BasicVariables: basicVariables, // Current basic variables
-            optType: optType // Optimization type
+            originalObjective: originalObjectiveProp, // Pass the *original* un-transformed objective
+            phase1Table: simplexTable, 
+            phase1Variables: variables, 
+            phase1BasicVariables: basicVariables, 
+            optType: optType,
+            variableSigns: variableSigns, // Pass the signs through
+            transformedVariableNames: transformedVariableNames // Pass the new variable names
         });
     };
 

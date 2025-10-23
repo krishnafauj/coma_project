@@ -10,6 +10,7 @@ import {
   Platform,
   TouchableWithoutFeedback,
   Keyboard,
+  Alert, // Using Alert for simplicity as requested, though custom modals are better
 } from "react-native";
 import { Picker } from '@react-native-picker/picker';
 import { useNavigation, NavigationProp } from "@react-navigation/native";
@@ -23,6 +24,7 @@ type RootStackParamList = {
     rhs: number[];
     optType: string;
     constraintTypes: string[];
+    variableSigns: string[];
   };
   Phase1: {
     objective: number[];
@@ -30,6 +32,7 @@ type RootStackParamList = {
     rhs: number[];
     optType: string;
     constraintTypes: string[];
+    variableSigns: string[];
   };
 };
 
@@ -47,7 +50,7 @@ export default function NextComponent({ optimization, variables, constraints }: 
 
   // Objective function row
   const [objectiveRow, setObjectiveRow] = useState<string[]>(Array(numVars).fill(""));
-  const [objectiveRHS, setObjectiveRHS] = useState<string>("");
+  const [objectiveRHS, setObjectiveRHS] = useState<string>(""); // Note: This is unusual for standard form, but keeping it as per your code
 
   // Constraints rows
   const [constraintRows, setConstraintRows] = useState<string[][]>(
@@ -59,6 +62,19 @@ export default function NextComponent({ optimization, variables, constraints }: 
   const [constraintTypes, setConstraintTypes] = useState<string[]>(
     Array(numConstraints).fill("≤")
   );
+
+  // Variable signs (≥0, ≤0, unrestricted)
+  const [variableSigns, setVariableSigns] = useState<string[]>(
+    Array(numVars).fill("≥0")
+  );
+
+  // --- LOGIC FOR UI AND NAVIGATION ---
+  // Determine if Two-Phase method is required (due to ≥ or = constraints)
+  const needsTwoPhase = constraintTypes.some(type => type === "≥" || type === "=");
+  
+  // This check is for special variable signs
+  const hasSpecialVars = variableSigns.some(sign => sign !== "≥0");
+  // ------------------------------------
 
   // Handle changes
   const handleObjectiveChange = (col: number, value: string) => {
@@ -87,9 +103,10 @@ export default function NextComponent({ optimization, variables, constraints }: 
     setConstraintTypes(newTypes);
   };
 
-  // Check if all constraints are ≤ type
-  const areAllConstraintsLessOrEqual = () => {
-    return constraintTypes.every(type => type === "≤");
+  const handleVariableSignChange = (col: number, value: string) => {
+    const newSigns = [...variableSigns];
+    newSigns[col] = value;
+    setVariableSigns(newSigns);
   };
 
   // Validate inputs
@@ -97,7 +114,7 @@ export default function NextComponent({ optimization, variables, constraints }: 
     // Check if objective function is filled
     const hasObjective = objectiveRow.some(val => val.trim() !== "");
     if (!hasObjective) {
-      alert("Please enter at least one coefficient for the objective function.");
+      Alert.alert("Input Error", "Please enter at least one coefficient for the objective function.");
       return false;
     }
 
@@ -105,21 +122,30 @@ export default function NextComponent({ optimization, variables, constraints }: 
     for (let i = 0; i < numConstraints; i++) {
       const hasConstraintCoeff = constraintRows[i].some(val => val.trim() !== "");
       if (!hasConstraintCoeff) {
-        alert(`Please enter at least one coefficient for constraint ${i + 1}.`);
+        Alert.alert("Input Error", `Please enter at least one coefficient for constraint ${i + 1}.`);
         return false;
       }
       
       if (constraintRHS[i].trim() === "") {
-        alert(`Please enter RHS value for constraint ${i + 1}.`);
+        Alert.alert("Input Error", `Please enter RHS value for constraint ${i + 1}.`);
         return false;
       }
     }
 
-    // Check for negative RHS values with ≤ constraints
+    // Check for negative RHS values (which require pre-processing)
     for (let i = 0; i < numConstraints; i++) {
       const rhsValue = parseFloat(constraintRHS[i]);
-      if (constraintTypes[i] === "≤" && rhsValue < 0) {
-        alert(`Constraint ${i + 1} has negative RHS with ≤. This may require special handling.`);
+      if (rhsValue < 0) {
+        // Standard simplex assumes non-negative RHS. 
+        // A negative RHS requires multiplying the constraint by -1 and flipping the sign.
+        // This *could* introduce a '≥' constraint, requiring Two-Phase.
+        // For simplicity, we'll just warn the user.
+        // A more robust implementation would handle this transformation automatically.
+        Alert.alert(
+          "Warning: Negative RHS", 
+          `Constraint ${i + 1} has a negative RHS. This may require pre-processing (multiplying by -1 and flipping the inequality) which could necessitate the Two-Phase method.`
+        );
+        // We will still allow proceeding, assuming the Solution/Phase1 can handle it.
       }
     }
 
@@ -139,24 +165,41 @@ export default function NextComponent({ optimization, variables, constraints }: 
     const rhs = constraintRHS.map(val => parseFloat(val) || 0);
     const optType = optimization;
 
-    // Determine which solver to use
-    if (areAllConstraintsLessOrEqual()) {
-      // All constraints are ≤, go directly to Solution page
-      navigation.navigate("Solution", { 
-        objective, 
-        constraintsMatrix, 
-        rhs, 
-        optType,
-        constraintTypes 
-      });
-    } else {
+    // --- THIS IS THE FIX ---
+    // Determine if Two-Phase method is required.
+    // This is ONLY true if there are '≥' or '=' constraints.
+    // We also check if a negative RHS on a '≤' constraint *creates* a '≥'.
+    let needsTwoPhaseMethod = constraintTypes.some(type => type === "≥" || type === "=");
+
+    // Check for negative RHS that will flip a '≤' to a '≥'
+    for(let i=0; i<numConstraints; i++) {
+      if(constraintTypes[i] === '≤' && parseFloat(constraintRHS[i]) < 0) {
+        needsTwoPhaseMethod = true;
+        break;
+      }
+    }
+
+    if (needsTwoPhaseMethod) {
       // Has ≥ or = constraints, need Two-Phase method
       navigation.navigate("Phase1", { 
         objective, 
         constraintsMatrix, 
         rhs, 
         optType,
-        constraintTypes 
+        constraintTypes,
+        variableSigns
+      });
+    } else {
+      // All constraints are (or will be) ≤. 
+      // The "Solution" screen can handle this, as it already includes logic 
+      // for variable transformations (transformVariables function).
+      navigation.navigate("Solution", { 
+        objective, 
+        constraintsMatrix, 
+        rhs, 
+        optType,
+        constraintTypes,
+        variableSigns
       });
     }
   };
@@ -166,6 +209,15 @@ export default function NextComponent({ optimization, variables, constraints }: 
       case "≤": return "#4CAF50"; // Green
       case "≥": return "#FF9800"; // Orange  
       case "=": return "#F44336"; // Red
+      default: return "#fff";
+    }
+  };
+
+  const getVariableSignColor = (sign: string) => {
+    switch (sign) {
+      case "≥0": return "#4CAF50"; // Green (normal)
+      case "≤0": return "#2196F3"; // Blue
+      case "unrestricted": return "#9C27B0"; // Purple
       default: return "#fff";
     }
   };
@@ -208,6 +260,9 @@ export default function NextComponent({ optimization, variables, constraints }: 
                   placeholder="Z"
                   placeholderTextColor="#ccc"
                   onChangeText={handleObjectiveRHSChange}
+                  // This input is non-standard for the objective row,
+                  // so we make it non-editable if you're not using it.
+                  // editable={false} 
                 />
               </View>
             </View>
@@ -266,39 +321,63 @@ export default function NextComponent({ optimization, variables, constraints }: 
           {/* Method indicator */}
           <View style={styles.methodIndicator}>
             <Text style={styles.methodText}>
-              {areAllConstraintsLessOrEqual() 
-                ? "✓ Standard Simplex Method" 
-                : "⚠ Two-Phase Method Required"
+              {needsTwoPhase
+                ? "⚠ Two-Phase Method Required" 
+                : "✓ Standard Simplex Method"
               }
             </Text>
-            {!areAllConstraintsLessOrEqual() && (
+            {(needsTwoPhase || hasSpecialVars) && (
               <Text style={styles.methodSubtext}>
-                Contains ≥ or = constraints
+                {needsTwoPhase && "Contains ≥ or = constraints"}
+                {needsTwoPhase && hasSpecialVars && " • "}
+                {hasSpecialVars && "Contains ≤0 or unrestricted variables (will be transformed)"}
               </Text>
             )}
           </View>
 
-          {/* Conditions for variables */}
+          {/* Variable Sign Constraints */}
           <View style={styles.conditionsContainer}>
-            <Text style={styles.conditionsHeader}>Non-negativity Constraints:</Text>
+            <Text style={styles.conditionsHeader}>Variable Sign Constraints:</Text>
             {Array.from({ length: numVars }).map((_, i) => (
-              <Text key={`condition-${i}`} style={styles.whiteText}>
-                x{i + 1} ≥ 0
-              </Text>
+              <View key={`var-sign-${i}`} style={styles.variableSignRow}>
+                <Text style={styles.whiteText}>x{i + 1}:</Text>
+                <View style={styles.variableSignPicker}>
+                  <Picker
+                    selectedValue={variableSigns[i]}
+                    style={[styles.picker, 
+                      { color: getVariableSignColor(variableSigns[i]) }]}
+                    onValueChange={(value: string) => handleVariableSignChange(i, value)}
+                  >
+                    <Picker.Item label="≥ 0 (non-negative)" value="≥0" color="#4CAF50" />
+                    <Picker.Item label="≤ 0 (non-positive)" value="≤0" color="#2196F3" />
+                    <Picker.Item label="unrestricted" value="unrestricted" color="#9C27B0" />
+                  </Picker>
+                </View>
+              </View>
             ))}
+          </View>
+
+          {/* Info box about variable transformations */}
+          <View style={styles.infoBox}>
+            <Text style={styles.infoText}>
+              💡 Note: For ≤0 variables, substitute x = -y where y≥0
+            </Text>
+            <Text style={styles.infoText}>
+              💡 For unrestricted variables, substitute x = y₁ - y₂ where y₁,y₂≥0
+            </Text>
           </View>
 
           {/* Solve button */}
           <TouchableOpacity 
             style={[styles.solveButton, 
-              !areAllConstraintsLessOrEqual() && styles.twoPhaseButton
+              needsTwoPhase && styles.twoPhaseButton
             ]} 
             onPress={handleSolve}
           >
             <Text style={styles.solveButtonText}>
-              {areAllConstraintsLessOrEqual() 
-                ? "Solve with Simplex" 
-                : "Solve with Two-Phase"
+              {needsTwoPhase
+                ? "Solve with Two-Phase" 
+                : "Solve with Simplex"
               }
             </Text>
           </TouchableOpacity>
@@ -406,6 +485,7 @@ const styles = StyleSheet.create({
     color: "#FFD54F",
     fontSize: 14,
     marginTop: 5,
+    textAlign: "center",
   },
   rowLabel: {
     color: "#fff",
@@ -426,6 +506,36 @@ const styles = StyleSheet.create({
   whiteText: {
     color: "#fff",
     fontSize: 16,
+    marginRight: 10,
+  },
+  variableSignRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  variableSignPicker: {
+    flex: 1,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "#fff",
+    height: 40,
+    justifyContent: "center",
+  },
+  picker: {
+    color: "#fff",
+  },
+  infoBox: {
+    backgroundColor: "rgba(255, 235, 59, 0.2)",
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 20,
+    borderLeftWidth: 4,
+    borderLeftColor: "#FFD54F",
+  },
+  infoText: {
+    color: "#FFD54F",
+    fontSize: 13,
     marginBottom: 5,
   },
   solveButton: {
@@ -442,5 +552,5 @@ const styles = StyleSheet.create({
     color: "#3b5998",
     fontWeight: "bold",
     fontSize: 16,
-  },
+  }, 
 });

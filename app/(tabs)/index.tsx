@@ -11,7 +11,7 @@ export default function Index() {
 
   return (
     <LinearGradient colors={['#4c669f', '#3b5998', '#192f6a']} style={styles.container}>
-      <Text style={styles.heading}>Simplex Optimization</Text>
+      <Text style={styles.heading}>Linear Optimization</Text>
       <View style={styles.toggleContainer}>
         <TouchableOpacity
           style={[styles.toggleButton, optimization === "Maximize" && styles.activeToggle]}

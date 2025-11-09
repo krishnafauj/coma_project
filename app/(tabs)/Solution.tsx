@@ -10,7 +10,7 @@ import {
 } from "react-native";
 import { useRoute, useNavigation, NavigationProp, RouteProp } from "@react-navigation/native";
 
-// Helper function to convert decimal to fraction - FIXED VERSION
+// Helper function to convert decimal to fraction
 const decimalToFraction = (decimal: number): string => {
   if (decimal === Infinity) return "∞";
   if (decimal === -Infinity) return "-∞";
@@ -83,7 +83,7 @@ const decimalToFraction = (decimal: number): string => {
 type RootStackParamList = {
   Home: undefined;
   NextComponent: { optimization: string; variables: string; constraints: string };
-  Solution: { // Renaming to 'Solution' to match navigation
+  Solution: {
     objective: number[];
     constraintsMatrix: number[][];
     rhs: number[];
@@ -93,37 +93,40 @@ type RootStackParamList = {
   };
 };
 
-// Adjust RouteProp to match the navigation name 'Solution'
 type SolutionPageRouteProp = RouteProp<RootStackParamList, "Solution">;
+
+// Enhanced variable mapping structure
+interface VariableTransform {
+  originalIndex: number;
+  originalName: string;
+  transformType: 'normal' | 'negated' | 'unrestricted_pos' | 'unrestricted_neg';
+  transformedName: string;
+}
 
 export default function SolutionPage() {
   const navigation = useNavigation<NavigationProp<RootStackParamList>>();
   const route = useRoute<SolutionPageRouteProp>();
   
-  // Destructuring params from route
   const { 
     objective: initialObjective, 
     constraintsMatrix: initialConstraints, 
     rhs: initialRhs, 
     optType, 
-    constraintTypes, // Not strictly needed by this component if only '≤'
+    constraintTypes,
     variableSigns 
   } = route.params;
 
-  // Core simplex state
   const [simplexTable, setSimplexTable] = useState<number[][]>([]);
-  const [variables, setVariables] = useState<string[]>([]); // Transformed variables
-  const [cj, setCj] = useState<number[]>([]); // Cj for transformed variables
+  const [variables, setVariables] = useState<string[]>([]);
+  const [cj, setCj] = useState<number[]>([]);
   const [basicVariables, setBasicVariables] = useState<string[]>([]);
-  const [equations, setEquations] = useState<string[]>([]); // Formatted equations
+  const [equations, setEquations] = useState<string[]>([]);
   const [enteringVar, setEnteringVar] = useState<string | null>(null);
   const [leavingVar, setLeavingVar] = useState<string | null>(null);
   const [iteration, setIteration] = useState<number>(1);
   const [message, setMessage] = useState<string | null>(null);
 
-  // Store mapping for transformed variables
-  const [variableMapping, setVariableMapping] = useState<Map<string, string>>(new Map());
-  // Store the *original* variable count for final solution display
+  const [variableTransforms, setVariableTransforms] = useState<VariableTransform[]>([]);
   const [originalVarCount, setOriginalVarCount] = useState<number>(0);
 
   const [initialState, setInitialState] = useState<{
@@ -138,53 +141,17 @@ export default function SolutionPage() {
   useEffect(() => {
     setOriginalVarCount(initialObjective.length);
     
-    // Pre-process constraints:
-    // Standard Simplex (non-Two-Phase) assumes all RHS are non-negative.
-    // If RHS is negative, multiply constraint by -1 and flip inequality.
-    // Since we're in Solution.tsx, we *assume* all constraints are '≤'.
-    // A negative RHS on a '≤' becomes a positive RHS on a '≥', 
-    // which *should* have gone to Phase1.
-    // We will handle the simple transformation for this screen's assumption.
-    
-    const processedConstraints = initialConstraints.map((row, i) => {
-      if (initialRhs[i] < 0) {
-        // This is the case NextComponent should have warned about.
-        // If it was a '≤' constraint: -x <= -5  =>  x >= 5
-        // This screen *cannot* handle '≥' constraints, it relies on slack variables only.
-        // We'll proceed assuming the user was warned or it's an error.
-        // For this component to work, we'll just multiply by -1
-        // and assume the user *meant* for it to be a '≥' constraint
-        // which is a logical flaw, but it's the only way to proceed.
-        // A better app would have *forced* this to Phase 1.
-        
-        // Let's stick to the assumption: only '≤' constraints arrive here.
-        // If RHS is negative, we MUST multiply by -1.
-        // e.g., x1 + x2 <= -5
-        // becomes -x1 - x2 >= 5.
-        // This *requires* an artificial variable.
-        //
-        // Let's assume the logic in NextComponent *correctly* filters.
-        // If a '≤' had a negative RHS, it would set `needsTwoPhaseMethod = true`
-        // and send to Phase1.
-        // THEREFORE, we can assume all `initialRhs[i] >= 0` here.
-        return [...row];
-      }
-      return [...row];
-    });
-    
-    const processedRhs = initialRhs.map(val => val < 0 ? -val : val);
+    const processedConstraints = initialConstraints.map(row => [...row]);
+    const processedRhs = initialRhs.map(val => Math.abs(val));
 
-
-    // Now, transform variables
-    const { transformedObj, transformedConstraints, newVarSigns, varMap } = 
+    const { transformedObj, transformedConstraints, newVarSigns, transforms } = 
       transformVariables(initialObjective, processedConstraints, variableSigns);
     
-    setVariableMapping(varMap);
-    // Format equations based on *transformed* problem
-    formatEquations(transformedObj, transformedConstraints, processedRhs, newVarSigns);
+    setVariableTransforms(transforms);
+    formatEquations(initialObjective, initialConstraints, initialRhs, variableSigns);
     
-    // Adjust objective for simplex tableau (Maximize Z)
-    // If Minimizing, we Maximize (-Z).
+    // For MAXIMIZATION: use objective as-is
+    // For MINIMIZATION: negate objective (we maximize -Z)
     const adjustedObjective = optType === "Minimize" ? 
       transformedObj.map((v) => -v) : [...transformedObj];
     
@@ -192,7 +159,6 @@ export default function SolutionPage() {
     
   }, [initialObjective, initialConstraints, initialRhs, optType, variableSigns]);
 
-  // Transform variables based on their sign constraints
   const transformVariables = (
     obj: number[],
     constraints: number[][],
@@ -201,56 +167,70 @@ export default function SolutionPage() {
     let transformedObj: number[] = [];
     let transformedConstraints: number[][] = constraints.map(row => []);
     let newVarSigns: string[] = [];
-    let varMap = new Map<string, string>(); // Map<TransformedName, OriginalName>
+    let transforms: VariableTransform[] = [];
     
-    let newVarIndex = 1; // Start naming transformed vars from x1, x2...
+    let newVarIndex = 1;
 
     for (let i = 0; i < obj.length; i++) {
       const sign = varSigns[i];
       const originalVarName = `x${i + 1}`;
       
       if (sign === "≥0") {
-        // Normal case: x_i ≥ 0
         const transformedName = `x${newVarIndex}`;
         transformedObj.push(obj[i]);
         for (let r = 0; r < constraints.length; r++) {
           transformedConstraints[r].push(constraints[r][i]);
         }
         newVarSigns.push("≥0");
-        varMap.set(transformedName, originalVarName); // x1_trans -> x1_orig
+        transforms.push({
+          originalIndex: i,
+          originalName: originalVarName,
+          transformType: 'normal',
+          transformedName: transformedName
+        });
         newVarIndex++;
         
       } else if (sign === "≤0") {
-        // x_i ≤ 0, substitute x_i = -y_i where y_i ≥ 0
-        // We'll call y_i as our new transformed variable
         const transformedName = `x${newVarIndex}`;
-        // c_i * x_i becomes c_i * (-y_i) = -c_i * y_i
         transformedObj.push(-obj[i]);
         for (let r = 0; r < constraints.length; r++) {
           transformedConstraints[r].push(-constraints[r][i]);
         }
         newVarSigns.push("≥0");
-        varMap.set(transformedName, `-${originalVarName}`); // x1_trans -> -x1_orig
+        transforms.push({
+          originalIndex: i,
+          originalName: originalVarName,
+          transformType: 'negated',
+          transformedName: transformedName
+        });
         newVarIndex++;
         
       } else if (sign === "unrestricted") {
-        // x_i unrestricted, substitute x_i = y_i1 - y_i2 where y_i1, y_i2 ≥ 0
         const transformedName1 = `x${newVarIndex}`;
         const transformedName2 = `x${newVarIndex + 1}`;
 
-        // c_i * x_i becomes c_i * (y_i1 - y_i2) = c_i * y_i1 - c_i * y_i2
-        transformedObj.push(obj[i]);  // coefficient for y_i1
-        transformedObj.push(-obj[i]); // coefficient for y_i2
+        transformedObj.push(obj[i]);
+        transformedObj.push(-obj[i]);
         
         for (let r = 0; r < constraints.length; r++) {
-          transformedConstraints[r].push(constraints[r][i]);   // y_i1
-          transformedConstraints[r].push(-constraints[r][i]);  // y_i2
+          transformedConstraints[r].push(constraints[r][i]);
+          transformedConstraints[r].push(-constraints[r][i]);
         }
         
         newVarSigns.push("≥0");
         newVarSigns.push("≥0");
-        varMap.set(transformedName1, `${originalVarName}⁺`); // x1_trans -> x1_orig+
-        varMap.set(transformedName2, `${originalVarName}⁻`); // x2_trans -> x1_orig-
+        transforms.push({
+          originalIndex: i,
+          originalName: originalVarName,
+          transformType: 'unrestricted_pos',
+          transformedName: transformedName1
+        });
+        transforms.push({
+          originalIndex: i,
+          originalName: originalVarName,
+          transformType: 'unrestricted_neg',
+          transformedName: transformedName2
+        });
         newVarIndex += 2;
       }
     }
@@ -259,13 +239,12 @@ export default function SolutionPage() {
       transformedObj, 
       transformedConstraints, 
       newVarSigns, 
-      varMap 
+      transforms 
     };
   };
 
   const formatEquations = (obj: number[], constraints: number[][], rhsValues: number[], varSigns: string[]) => {
-    // Format objective based on *original* user input
-    const originalObjectiveTerms = initialObjective
+    const originalObjectiveTerms = obj
       .map((coeff, index) => {
         if (Math.abs(coeff) < 1e-10) return null;
         const sign = coeff >= 0 ? "+" : "-";
@@ -280,8 +259,7 @@ export default function SolutionPage() {
     if (originalObjectiveStr === "") originalObjectiveStr = "0";
     const formattedObjective = `${optType === "Maximize" ? "Maximize" : "Minimize"} Z = ${originalObjectiveStr}`;
 
-    // Format constraints based on *original* user input
-    const constraintEquations = initialConstraints.map((constraint, rowIndex) => {
+    const constraintEquations = constraints.map((constraint, rowIndex) => {
       const constraintTerms = constraint
         .map((coeff, index) => {
           if (Math.abs(coeff) < 1e-10) return null;
@@ -295,12 +273,10 @@ export default function SolutionPage() {
       let constraintStr = constraintTerms.join(" ");
       if (constraintStr.startsWith("+ ")) constraintStr = constraintStr.substring(2);
       if (constraintStr === "") constraintStr = "0";
-      // Use original constraint types and RHS
-      return `${constraintStr} ${constraintTypes[rowIndex]} ${decimalToFraction(initialRhs[rowIndex])}`;
+      return `${constraintStr} ${constraintTypes[rowIndex]} ${decimalToFraction(rhsValues[rowIndex])}`;
     });
 
-    // Format variable signs based on *original* user input
-    const nonNegativityConstraints = variableSigns.map((sign, index) => {
+    const nonNegativityConstraints = varSigns.map((sign, index) => {
       if (sign === "≥0") return `x${index + 1} ≥ 0`;
       if (sign === "≤0") return `x${index + 1} ≤ 0`;
       return `x${index + 1} unrestricted`;
@@ -310,82 +286,69 @@ export default function SolutionPage() {
   };
 
   const createInitialSimplexTable = (obj: number[], constraints: number[][], rhsValues: number[]) => {
-    const numVars = obj.length; // Number of *transformed* variables
+    const numVars = obj.length;
     const numConstraints = constraints.length;
 
-    // Cj row includes transformed vars + slack vars
     const newCj = [...obj, ...Array(numConstraints).fill(0)];
     setCj(newCj);
 
-    // Variables row includes transformed vars + slack vars
     const newVariables = [
-      ...Array(numVars)
-        .fill(0)
-        .map((_, i) => `x${i + 1}`), // These are x1, x2... of the *transformed* problem
-      ...Array(numConstraints)
-        .fill(0)
-        .map((_, i) => `s${i + 1}`),
+      ...Array(numVars).fill(0).map((_, i) => `x${i + 1}`),
+      ...Array(numConstraints).fill(0).map((_, i) => `s${i + 1}`),
     ];
     setVariables(newVariables);
 
-    // Basic variables are initially the slack variables
-    const newBasicVariables = Array(numConstraints)
-      .fill(0)
-      .map((_, i) => `s${i + 1}`);
+    const newBasicVariables = Array(numConstraints).fill(0).map((_, i) => `s${i + 1}`);
     setBasicVariables(newBasicVariables);
 
-    // Create the simplex table
     const newSimplexTable: number[][] = [];
     for (let i = 0; i < numConstraints; i++) {
       const row = [
-        ...constraints[i], // Transformed constraint coefficients
-        ...Array(numConstraints)
-          .fill(0)
-          .map((_, j) => (i === j ? 1 : 0)), // Slack variable identity matrix
-        rhsValues[i], // Processed RHS values
+        ...constraints[i],
+        ...Array(numConstraints).fill(0).map((_, j) => (i === j ? 1 : 0)),
+        rhsValues[i],
       ];
       newSimplexTable.push(row);
     }
 
-    // Add empty Zj and Cj-Zj rows (will be computed)
     const cols = numVars + numConstraints + 1;
     const zjRow = Array(cols).fill(0);
-    const cjZjRow = Array(cols).fill(0);
+    const zjMinusCjRow = Array(cols).fill(0);
     newSimplexTable.push(zjRow);
-    newSimplexTable.push(cjZjRow);
+    newSimplexTable.push(zjMinusCjRow);
 
     setSimplexTable(newSimplexTable);
     setIteration(1);
     setMessage(null);
 
-    // Compute initial Zj and Cj-Zj and find first pivot
-    const computed = computeZjAndCjMinusZj(newSimplexTable, newBasicVariables, newCj, newVariables);
+    const computed = computeZjAndZjMinusCj(newSimplexTable, newBasicVariables, newCj, newVariables);
     setSimplexTable(computed.table);
     setEnteringVar(computed.enteringVar ?? null);
     setLeavingVar(computed.leavingVar ?? null);
 
-    // Save initial state for reset
     setInitialState({
       table: computed.table.map((r) => [...r]),
       vars: newVariables.slice(),
       cj: newCj.slice(),
       basics: newBasicVariables.slice(),
       iteration: 1,
-      equations: equations.slice(), // Equations are already set
+      equations: equations.slice(),
     });
   };
 
-  const computeZjAndCjMinusZj = (
+  const computeZjAndZjMinusCj = (
     table: number[][],
     basicVars: string[],
     cjRow: number[],
     allVars: string[]
   ) => {
-    if (table.length < 2) return { table, enteringVar: null as string | null, leavingVar: null as string | null };
+    if (table.length === 0) return { table, enteringVar: null as string | null, leavingVar: null as string | null };
 
-    const rowsCount = table.length - 2;
+    // Handle both cases: table with or without Zj/Zj-Cj rows
+    const hasZjRows = table.length > basicVars.length;
+    const rowsCount = hasZjRows ? table.length - 2 : table.length;
     const cols = table[0].length;
-    // Get Cj values for the current basic variables
+    
     const cb: number[] = basicVars.map((b) => {
       const idx = allVars.indexOf(b);
       if (idx === -1) return 0;
@@ -401,47 +364,50 @@ export default function SolutionPage() {
       zjRow[j] = sum;
     }
 
-    const cjZjRow = Array(cols).fill(0);
-    for (let j = 0; j < cols; j++) {
-      if (j < cjRow.length) { // Zj row has same length as Cj row
-        cjZjRow[j] = cjRow[j] - zjRow[j];
-      } else { // Handle RHS column
-        cjZjRow[j] = 0 - zjRow[j]; // Cj for RHS is 0
+    // Calculate Zj - Cj (not Cj - Zj)
+    const zjMinusCjRow = Array(cols).fill(0);
+    for (let j = 0; j < cols - 1; j++) {
+      if (j < cjRow.length) {
+        zjMinusCjRow[j] = zjRow[j] - cjRow[j];
+      } else {
+        zjMinusCjRow[j] = zjRow[j];
       }
     }
-    // Correct Cj-Zj for RHS column (it's not used for pivot, just Z value)
-    cjZjRow[cols - 1] = 0;
+    zjMinusCjRow[cols - 1] = 0; // RHS column
 
-    // Clean up floating point noise
     for (let j = 0; j < cols; j++) {
       if (Math.abs(zjRow[j]) < 1e-10) zjRow[j] = 0;
-      if (Math.abs(cjZjRow[j]) < 1e-10) cjZjRow[j] = 0;
+      if (Math.abs(zjMinusCjRow[j]) < 1e-10) zjMinusCjRow[j] = 0;
     }
 
-    const newTable = table.slice(0, rowsCount).map((r) => r.slice());
+    // Always build new table with only constraint rows + new Zj and Zj-Cj
+    const newTable: number[][] = [];
+    for (let i = 0; i < rowsCount; i++) {
+      newTable.push([...table[i]]);
+    }
     newTable.push(zjRow);
-    newTable.push(cjZjRow);
+    newTable.push(zjMinusCjRow);
 
-    // Find entering variable (max positive Cj-Zj)
-    const cjZjVars = cjZjRow.slice(0, allVars.length);
-    const maxVal = Math.max(...cjZjVars);
+    // For MAXIMIZATION: optimal when all Zj - Cj ≤ 0 (or equivalently, when min(Zj-Cj) >= 0)
+    // We enter the variable with the MOST NEGATIVE Zj - Cj value
+    const zjMinusCjVars = zjMinusCjRow.slice(0, allVars.length);
+    const minVal = Math.min(...zjMinusCjVars);
     
-    if (maxVal <= 1e-10) { // Optimality condition met
+    if (minVal >= -1e-10) {
       return { table: newTable, enteringVar: null as string | null, leavingVar: null as string | null };
     }
     
-    const enteringIndex = cjZjVars.indexOf(maxVal);
+    const enteringIndex = zjMinusCjVars.indexOf(minVal);
     const enteringVarName = allVars[enteringIndex];
 
-    // Find leaving variable (min non-negative ratio)
     let minRatio = Infinity;
     let leavingIdx = -1;
     for (let i = 0; i < rowsCount; i++) {
       const colVal = newTable[i][enteringIndex];
       const rhsVal = newTable[i][newTable[i].length - 1];
-      if (colVal > 1e-10) { // Pivot element must be positive
+      if (colVal > 1e-10) {
         const ratio = rhsVal / colVal;
-        if (ratio >= -1e-10 && ratio < minRatio - 1e-10) { // Non-negative ratio check
+        if (ratio >= -1e-10 && ratio < minRatio - 1e-10) {
           minRatio = ratio;
           leavingIdx = i;
         }
@@ -453,8 +419,15 @@ export default function SolutionPage() {
   };
 
   const performPivot = (currentTable: number[][], pivotRowIdx: number, pivotColIdx: number) => {
-    const table = currentTable.map((r) => r.slice());
-    const rowsCount = table.length - 2; // Don't pivot Zj, Cj-Zj
+    // Take only constraint rows (exclude Zj and Zj-Cj if present)
+    const hasZjRows = currentTable.length > basicVariables.length;
+    const rowsCount = hasZjRows ? currentTable.length - 2 : currentTable.length;
+    
+    const table: number[][] = [];
+    for (let i = 0; i < rowsCount; i++) {
+      table.push([...currentTable[i]]);
+    }
+    
     const cols = table[0].length;
     const pivotVal = table[pivotRowIdx][pivotColIdx];
 
@@ -470,11 +443,11 @@ export default function SolutionPage() {
       }
     }
 
-    // 2. Clear other elements in the pivot column
+    // 2. Clear other elements in the pivot column (make them 0)
     for (let i = 0; i < rowsCount; i++) {
       if (i === pivotRowIdx) continue;
       const factor = table[i][pivotColIdx];
-      if (Math.abs(factor) < 1e-12) continue; // No operation needed
+      if (Math.abs(factor) < 1e-12) continue;
       
       for (let j = 0; j < cols; j++) {
         table[i][j] = table[i][j] - factor * table[pivotRowIdx][j];
@@ -484,31 +457,28 @@ export default function SolutionPage() {
       }
     }
 
-    // Return table *without* Zj and Cj-Zj rows, as they will be recomputed
-    return table.slice(0, rowsCount);
+    // Return only constraint rows
+    return table;
   };
 
   const handleNextIteration = () => {
     setMessage(null);
     if (!simplexTable || simplexTable.length < 2) return;
 
-    // Check for optimality
-    const cjZjRow = simplexTable[simplexTable.length - 1];
-    const cjZjVars = cjZjRow.slice(0, variables.length);
-    const maxVal = Math.max(...cjZjVars);
+    const zjMinusCjRow = simplexTable[simplexTable.length - 1];
+    const zjMinusCjVars = zjMinusCjRow.slice(0, variables.length);
+    const minVal = Math.min(...zjMinusCjVars);
 
-    if (maxVal <= 1e-10) {
+    if (minVal >= -1e-10) {
       setEnteringVar(null);
       setLeavingVar(null);
       setMessage(getOptimalSolutionMessage());
       return;
     }
 
-    // Find entering variable
-    const enteringIndex = cjZjVars.indexOf(maxVal);
+    const enteringIndex = zjMinusCjVars.indexOf(minVal);
     const enteringVarName = variables[enteringIndex];
 
-    // Find leaving variable
     const rowsCount = simplexTable.length - 2;
     const cols = simplexTable[0].length;
     let minRatio = Infinity;
@@ -526,7 +496,6 @@ export default function SolutionPage() {
     }
 
     if (leavingRowIdx === -1) {
-      // Unbounded solution
       setEnteringVar(enteringVarName);
       setLeavingVar(null);
       setMessage("Problem is unbounded (no valid leaving variable).");
@@ -536,33 +505,24 @@ export default function SolutionPage() {
     const leavingVarName = basicVariables[leavingRowIdx];
 
     try {
-      // Perform pivot operation
       const pivotedTable = performPivot(simplexTable, leavingRowIdx, enteringIndex);
-      
-      // Update basic variables
       const newBasics = basicVariables.slice();
       newBasics[leavingRowIdx] = enteringVarName;
       
-      // Recompute Zj and Cj-Zj and find next pivot
-      const computed = computeZjAndCjMinusZj(pivotedTable, newBasics, cj, variables);
+      const computed = computeZjAndZjMinusCj(pivotedTable, newBasics, cj, variables);
 
       setSimplexTable(computed.table);
       setBasicVariables(newBasics);
-      setEnteringVar(computed.enteringVar); // This will be null if optimal
-      setLeavingVar(computed.leavingVar);   // This will be null if optimal
+      setEnteringVar(computed.enteringVar);
+      setLeavingVar(computed.leavingVar);
       setIteration((prev) => prev + 1);
 
-      // Check if the new state is optimal
-      const cjZjNow = computed.table[computed.table.length - 1].slice(0, variables.length);
-      const maxNow = Math.max(...cjZjNow);
-      if (maxNow <= 1e-10) {
+      const zjMinusCjNow = computed.table[computed.table.length - 1].slice(0, variables.length);
+      const minNow = Math.min(...zjMinusCjNow);
+      if (minNow >= -1e-10) {
         setMessage(getOptimalSolutionMessage());
         setEnteringVar(null);
         setLeavingVar(null);
-      } else {
-        // Set pivot info for display
-        setEnteringVar(computed.enteringVar);
-        setLeavingVar(computed.leavingVar);
       }
     } catch (err) {
       setMessage("Error during pivot: " + (err as Error).message);
@@ -570,6 +530,8 @@ export default function SolutionPage() {
   };
 
   const getOptimalSolutionMessage = (): string => {
+    if (!simplexTable || simplexTable.length < 2) return "Error: Invalid table state";
+    
     const cols = simplexTable[0].length;
     const zjRow = simplexTable[simplexTable.length - 2];
     const optimalZ = zjRow[cols - 1];
@@ -577,48 +539,50 @@ export default function SolutionPage() {
     // If we minimized by negating, negate back
     const actualZ = optType === "Minimize" ? -optimalZ : optimalZ;
     
-    let message = `Optimal solution reached.\nOptimal Z = ${decimalToFraction(actualZ)}\n\n`;
+    let message = ``;
     
-    // Get solution values for original variables
-    message += "Solution:\n";
+    
     for (let i = 0; i < originalVarCount; i++) {
       const originalVar = `x${i + 1}`;
-      const value = getOriginalVariableValue(originalVar);
+      const value = getOriginalVariableValue(i);
       message += `${originalVar} = ${decimalToFraction(value)}\n`;
     }
     
     return message;
   };
 
-  const getOriginalVariableValue = (originalVar: string): number => {
+  const getOriginalVariableValue = (originalIndex: number): number => {
+    if (!simplexTable || simplexTable.length < 2) return 0;
+    
     let value = 0;
     
-    // This loops through the mapping: Map<TransformedName, OriginalNameIndicator>
-    variableMapping.forEach((originalNameIndicator, transformedName) => {
-      // Check if the indicator (e.g., "x1", "-x1", "x1⁺", "x1⁻") belongs to the original var
-      if (originalNameIndicator.includes(originalVar)) {
+    // Find all transforms related to this original variable
+    const relatedTransforms = variableTransforms.filter(t => t.originalIndex === originalIndex);
+    
+    for (const transform of relatedTransforms) {
+      const basicIdx = basicVariables.indexOf(transform.transformedName);
+      
+      if (basicIdx !== -1 && basicIdx < simplexTable.length - 2) {
+        const cols = simplexTable[0].length;
+        const rhsValue = simplexTable[basicIdx][cols - 1];
         
-        // Find if the transformed var is in the final basis
-        const idx = basicVariables.indexOf(transformedName);
-        
-        if (idx !== -1) {
-          // It's in the basis, get its value from RHS
-          const cols = simplexTable[0].length;
-          const rhsValue = simplexTable[idx][cols - 1];
-          
-          if (originalNameIndicator.includes('⁺')) {
-            value += rhsValue; // x+ part
-          } else if (originalNameIndicator.includes('⁻')) {
-            value -= rhsValue; // x- part
-          } else if (originalNameIndicator.startsWith('-')) {
-            value = -rhsValue; // negated variable
-          } else {
-            value = rhsValue; // normal variable
-          }
+        switch (transform.transformType) {
+          case 'normal':
+            value = rhsValue;
+            break;
+          case 'negated':
+            value = -rhsValue;
+            break;
+          case 'unrestricted_pos':
+            value += rhsValue;
+            break;
+          case 'unrestricted_neg':
+            value -= rhsValue;
+            break;
         }
-        // If not in basis, its value is 0, so we add 0, which is correct.
       }
-    });
+      // If not in basis, the variable's contribution is 0
+    }
     
     return value;
   };
@@ -633,8 +597,7 @@ export default function SolutionPage() {
     setEquations(initialState.equations.slice());
     setMessage(null);
 
-    // Re-run pivot finding on initial state
-    const computed = computeZjAndCjMinusZj(initialState.table, initialState.basics, initialState.cj, initialState.vars);
+    const computed = computeZjAndZjMinusCj(initialState.table, initialState.basics, initialState.cj, initialState.vars);
     setSimplexTable(computed.table);
     setEnteringVar(computed.enteringVar ?? null);
     setLeavingVar(computed.leavingVar ?? null);
@@ -650,11 +613,10 @@ export default function SolutionPage() {
     
     for (let i = 0; i < maxIterations; i++) {
       const lastRow = currentTable[currentTable.length - 1] ?? [];
-      const cjZjVars = lastRow.slice(0, variables.length);
-      const maxVal = cjZjVars.length ? Math.max(...cjZjVars) : -Infinity;
+      const zjMinusCjVars = lastRow.slice(0, variables.length);
+      const minVal = zjMinusCjVars.length ? Math.min(...zjMinusCjVars) : Infinity;
       
-      if (maxVal <= 1e-10) {
-        // Optimal
+      if (minVal >= -1e-10) {
         setSimplexTable(currentTable);
         setBasicVariables(currentBasics);
         setIteration(currentIteration);
@@ -664,7 +626,7 @@ export default function SolutionPage() {
         return;
       }
       
-      const enteringIndex = cjZjVars.indexOf(maxVal);
+      const enteringIndex = zjMinusCjVars.indexOf(minVal);
       
       let minRatio = Infinity;
       let leavingRowIdx = -1;
@@ -684,7 +646,6 @@ export default function SolutionPage() {
       }
       
       if (leavingRowIdx === -1) {
-        // Unbounded
         setSimplexTable(currentTable);
         setBasicVariables(currentBasics);
         setIteration(currentIteration);
@@ -698,7 +659,7 @@ export default function SolutionPage() {
         const pivotedTable = performPivot(currentTable, leavingRowIdx, enteringIndex);
         const newBasics = currentBasics.slice();
         newBasics[leavingRowIdx] = variables[enteringIndex];
-        const computed = computeZjAndCjMinusZj(pivotedTable, newBasics, cj, variables);
+        const computed = computeZjAndZjMinusCj(pivotedTable, newBasics, cj, variables);
 
         currentTable = computed.table;
         currentBasics = newBasics;
@@ -710,7 +671,6 @@ export default function SolutionPage() {
       }
     }
     
-    // Hit max iterations
     setSimplexTable(currentTable);
     setBasicVariables(currentBasics);
     setIteration(currentIteration);
@@ -722,7 +682,6 @@ export default function SolutionPage() {
 
     const numVars = variables.length;
     const screenWidth = Dimensions.get("window").width;
-    // Calculate cell width: 2 for basis/CB, numVars, 1 for solution
     const cellWidth = Math.max(80, screenWidth / (numVars + 3)); 
 
     return (
@@ -813,17 +772,17 @@ export default function SolutionPage() {
               ))}
             </View>
 
-            {/* Cj - Zj Row */}
+            {/* Zj - Cj Row */}
             <View style={[styles.row, styles.cjZjRow]}>
               <View style={[styles.cell, { width: cellWidth }]}>
-                <Text style={styles.cellText}>Cj - Zj</Text>
+                <Text style={styles.cellText}>Zj - Cj</Text>
               </View>
               <View style={[styles.cell, { width: cellWidth }]}>
                 <Text style={styles.cellText}></Text>
               </View>
               {simplexTable[simplexTable.length - 1].map((value, colIndex) => (
                 <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
-                  <Text style={[styles.cellText, value > 1e-10 ? styles.positiveValue : (value < -1e-10 ? styles.negativeValue : {})]}>
+                  <Text style={[styles.cellText, value < -1e-10 ? styles.negativeValue : (value > 1e-10 ? styles.positiveValue : {})]}>
                     {decimalToFraction(value)}
                   </Text>
                 </View>
@@ -864,7 +823,7 @@ export default function SolutionPage() {
           <Text style={styles.subHeading}>Pivot Information:</Text>
           <Text style={styles.equationText}>Entering Variable: {enteringVar ?? "None"}</Text>
           <Text style={styles.equationText}>Leaving Variable: {leavingVar ?? "None"}</Text>
-          {message ? <Text style={[styles.equationText, { fontStyle: "normal", color: isOptimal ? "#4CAF50" : "#FFD54F" }]}>{message}</Text> : null}
+          {message ? <Text style={[styles.equationText, { fontStyle: "normal", color: isOptimal ? "#4CAF50" : "#FFD54F" }]}>Optimality Reached</Text> : null}
         </View>
 
         <View style={styles.buttonContainer}>
@@ -929,7 +888,6 @@ const styles = StyleSheet.create({
   nextButtonText: { color: "#fff", fontWeight: "bold", fontSize: 14 },
   solveButton: { backgroundColor: "#2196F3", padding: 12, borderRadius: 30, alignItems: "center", flex: 1 },
   solveButtonText: { color: "#fff", fontWeight: "bold" },
-  // Pivot indicators
   pivotRow: { backgroundColor: "rgba(255, 100, 100, 0.3)" },
   pivotCol: { backgroundColor: "rgba(100, 255, 100, 0.3)" },
   pivotElement: { backgroundColor: "rgba(255, 255, 100, 0.5)" },

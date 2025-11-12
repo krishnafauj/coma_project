@@ -119,6 +119,7 @@ type RootStackParamList = {
         optType: string;
         variableSigns: string[];
         transformedVariableNames: string[];
+        originalRHS: number[]; 
         // It's missing here
     };
 };
@@ -707,7 +708,8 @@ export default function Phase1() {
             phase1BasicVariables: basicVariables,
             optType: optType,
             variableSigns: variableSigns,
-            transformedVariableNames: transformedVariableNames
+            transformedVariableNames: transformedVariableNames,
+            originalRHS: rhs
         });
     };
 

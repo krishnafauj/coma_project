@@ -123,9 +123,10 @@ type RootStackParamList = {
         optType: string;
         variableSigns: string[];
         transformedVariableNames: string[];
-       
+        originalRHS: number[]; 
+
     };
-     RHSChange: {
+    RHSChange: {
         finalTable: number[][];
         variables: string[];
         basicVariables: string[];
@@ -150,6 +151,7 @@ export default function Phase2() {
         optType,
         variableSigns,
         transformedVariableNames,
+        originalRHS 
     } = route.params;
 
     const [simplexTable, setSimplexTable] = useState<number[][]>([]);
@@ -806,7 +808,7 @@ export default function Phase2() {
 
         navigateToSensitivity();
     };
-    const navigateToSensitivity = () => {
+   const navigateToSensitivity = () => {
     // Calculate B-inverse
     const m = simplexTable.length - 2;
     const bInv: number[][] = [];
@@ -826,6 +828,11 @@ export default function Phase2() {
         bInv.push(row);
     }
 
+    // Extract current constraints matrix (WITHOUT the RHS and Zj/Cj-Zj rows)
+    const currentConstraints = simplexTable.slice(0, -2).map(row => 
+        row.slice(0, -1) // Remove RHS column
+    );
+
     navigation.navigate("SensitivityAnalysis", {
         finalTable: simplexTable.map(row => [...row]),
         variables: variables.slice(),
@@ -834,139 +841,135 @@ export default function Phase2() {
         optType: optType,
         originalObjective: originalObjective.slice(),
         variableSigns: variableSigns.slice(),
-        constraintsMatrix: phase1Table.slice(0, -2).map(row =>
-            row.slice(0, -1).filter((_, idx) => !phase1Variables[idx]?.startsWith('a'))
-        ),
-        originalRHS: phase1Table.slice(0, -2).map(row =>
-            row[row.length - 1]
-        ),
+        constraintsMatrix: currentConstraints,
+        originalRHS: originalRHS.slice(), // ← FIXED: Use the ORIGINAL RHS passed from Phase1
     });
 };
     // *** MODIFICATION: Updated renderSimplexTable with dual highlighting ***
     const renderSimplexTable = () => {
-    if (simplexTable.length === 0) return null;
-    if (!Array.isArray(simplexTable) || simplexTable.length < 2) return null;
+        if (simplexTable.length === 0) return null;
+        if (!Array.isArray(simplexTable) || simplexTable.length < 2) return null;
 
-    const numVars = variables.length;
-    const screenWidth = Dimensions.get("window").width;
-    const cellWidth = Math.max(70, screenWidth / (numVars + 3));
+        const numVars = variables.length;
+        const screenWidth = Dimensions.get("window").width;
+        const cellWidth = Math.max(70, screenWidth / (numVars + 3));
 
-    return (
-        <View style={styles.tableContainer}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={true}>
-                <View>
-                    {/* Cj Row */}
-                    <View style={[styles.row, styles.cjRow]}>
-                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                            <Text style={styles.headerText}>Cj →</Text>
-                        </View>
-                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                            <Text style={styles.headerText}>{" "}</Text>
-                        </View>
-                        {cj.map((value, index) => (
-                            <View key={index} style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                <Text style={styles.headerText}>{decimalToFraction(value)}</Text>
+        return (
+            <View style={styles.tableContainer}>
+                <ScrollView horizontal showsHorizontalScrollIndicator={true}>
+                    <View>
+                        {/* Cj Row */}
+                        <View style={[styles.row, styles.cjRow]}>
+                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                <Text style={styles.headerText}>Cj →</Text>
                             </View>
-                        ))}
-                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                            <Text style={styles.headerText}>{" "}</Text>
-                        </View>
-                    </View>
-
-                    {/* Header Row */}
-                    <View style={[styles.row, styles.headerRow]}>
-                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                            <Text style={styles.headerText}>Basis</Text>
-                        </View>
-                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                            <Text style={styles.headerText}>CB</Text>
-                        </View>
-                        {variables.map((variable, index) => (
-                            <View key={index} style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                <Text style={styles.headerText}>{variable}</Text>
+                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                <Text style={styles.headerText}>{" "}</Text>
                             </View>
-                        ))}
-                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                            <Text style={styles.headerText}>Solution</Text>
-                        </View>
-                    </View>
-
-                    {/* Table Rows */}
-                    {simplexTable.slice(0, -2).map((row, rowIndex) => (
-                        <View key={rowIndex} style={styles.row}>
-                            <View style={[styles.cell, { width: cellWidth }]}>
-                                <Text style={styles.cellText}>{basicVariables[rowIndex] || ""}</Text>
+                            {cj.map((value, index) => (
+                                <View key={index} style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                    <Text style={styles.headerText}>{decimalToFraction(value)}</Text>
+                                </View>
+                            ))}
+                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                <Text style={styles.headerText}>{" "}</Text>
                             </View>
-                            <View style={[styles.cell, { width: cellWidth }]}>
-                                {(() => {
-                                    const idx = variables.indexOf(basicVariables[rowIndex]);
-                                    return (
+                        </View>
+
+                        {/* Header Row */}
+                        <View style={[styles.row, styles.headerRow]}>
+                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                <Text style={styles.headerText}>Basis</Text>
+                            </View>
+                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                <Text style={styles.headerText}>CB</Text>
+                            </View>
+                            {variables.map((variable, index) => (
+                                <View key={index} style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                    <Text style={styles.headerText}>{variable}</Text>
+                                </View>
+                            ))}
+                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                <Text style={styles.headerText}>Solution</Text>
+                            </View>
+                        </View>
+
+                        {/* Table Rows */}
+                        {simplexTable.slice(0, -2).map((row, rowIndex) => (
+                            <View key={rowIndex} style={styles.row}>
+                                <View style={[styles.cell, { width: cellWidth }]}>
+                                    <Text style={styles.cellText}>{basicVariables[rowIndex] || ""}</Text>
+                                </View>
+                                <View style={[styles.cell, { width: cellWidth }]}>
+                                    {(() => {
+                                        const idx = variables.indexOf(basicVariables[rowIndex]);
+                                        return (
+                                            <Text style={styles.cellText}>
+                                                {idx === -1 ? "0" : decimalToFraction(cj[idx])}
+                                            </Text>
+                                        );
+                                    })()}
+                                </View>
+                                {row.map((value, colIndex) => (
+                                    <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
                                         <Text style={styles.cellText}>
-                                            {idx === -1 ? "0" : decimalToFraction(cj[idx])}
+                                            {value !== undefined ? decimalToFraction(value) : "0"}
                                         </Text>
-                                    );
-                                })()}
+                                    </View>
+                                ))}
                             </View>
-                            {row.map((value, colIndex) => (
+                        ))}
+
+                        {/* Zj Row */}
+                        <View style={[styles.row, styles.zjRow]}>
+                            <View style={[styles.cell, { width: cellWidth }]}>
+                                <Text style={styles.cellText}>Zj</Text>
+                            </View>
+                            <View style={[styles.cell, { width: cellWidth }]}>
+                                <Text style={styles.cellText}>{" "}</Text>
+                            </View>
+                            {simplexTable[simplexTable.length - 2]?.map((value, colIndex) => (
                                 <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
                                     <Text style={styles.cellText}>
                                         {value !== undefined ? decimalToFraction(value) : "0"}
                                     </Text>
                                 </View>
-                            ))}
+                            )) || null}
                         </View>
-                    ))}
 
-                    {/* Zj Row */}
-                    <View style={[styles.row, styles.zjRow]}>
-                        <View style={[styles.cell, { width: cellWidth }]}>
-                            <Text style={styles.cellText}>Zj</Text>
-                        </View>
-                        <View style={[styles.cell, { width: cellWidth }]}>
-                            <Text style={styles.cellText}>{" "}</Text>
-                        </View>
-                        {simplexTable[simplexTable.length - 2]?.map((value, colIndex) => (
-                            <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
-                                <Text style={styles.cellText}>
-                                    {value !== undefined ? decimalToFraction(value) : "0"}
-                                </Text>
+                        {/* Cj - Zj Row */}
+                        <View style={[styles.row, styles.zjCjRow]}>
+                            <View style={[styles.cell, { width: cellWidth }]}>
+                                <Text style={styles.cellText}>Cj - Zj</Text>
                             </View>
-                        )) || null}
-                    </View>
-
-                    {/* Cj - Zj Row */}
-                    <View style={[styles.row, styles.zjCjRow]}>
-                        <View style={[styles.cell, { width: cellWidth }]}>
-                            <Text style={styles.cellText}>Cj - Zj</Text>
-                        </View>
-                        <View style={[styles.cell, { width: cellWidth }]}>
-                            <Text style={styles.cellText}>{" "}</Text>
-                        </View>
-                        {simplexTable[simplexTable.length - 1]?.map((value, colIndex) => {
-                            let textStyle = styles.cellText;
-                            // Highlight based on problem type
-                            if (value !== undefined) {
-                                if (optType === "Maximize" && value > 1e-10) {
-                                    textStyle = { ...textStyle, ...styles.positiveValue };
-                                } else if (optType === "Minimize" && value < -1e-10) {
-                                    textStyle = { ...textStyle, ...styles.negativeValue };
+                            <View style={[styles.cell, { width: cellWidth }]}>
+                                <Text style={styles.cellText}>{" "}</Text>
+                            </View>
+                            {simplexTable[simplexTable.length - 1]?.map((value, colIndex) => {
+                                let textStyle = styles.cellText;
+                                // Highlight based on problem type
+                                if (value !== undefined) {
+                                    if (optType === "Maximize" && value > 1e-10) {
+                                        textStyle = { ...textStyle, ...styles.positiveValue };
+                                    } else if (optType === "Minimize" && value < -1e-10) {
+                                        textStyle = { ...textStyle, ...styles.negativeValue };
+                                    }
                                 }
-                            }
 
-                            return (
-                                <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
-                                    <Text style={textStyle}>
-                                        {value !== undefined ? decimalToFraction(value) : "0"}
-                                    </Text>
-                                </View>
-                            );
-                        }) || null}
+                                return (
+                                    <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
+                                        <Text style={textStyle}>
+                                            {value !== undefined ? decimalToFraction(value) : "0"}
+                                        </Text>
+                                    </View>
+                                );
+                            }) || null}
+                        </View>
                     </View>
-                </View>
-            </ScrollView>
-        </View>
-    );
-};
+                </ScrollView>
+            </View>
+        );
+    };
     const handleGoBack = () => {
         navigation.goBack();
     };

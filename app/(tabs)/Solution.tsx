@@ -91,6 +91,17 @@ type RootStackParamList = {
     constraintTypes: string[];
     variableSigns: string[];
   };
+  SensitivityAnalysis: {
+    finalTable: number[][];
+    variables: string[];
+    basicVariables: string[];
+    cj: number[];
+    optType: string;
+    originalObjective: number[];
+    variableSigns: string[];
+    constraintsMatrix: number[][];
+    originalRHS: number[];
+  };
 };
 
 type SolutionPageRouteProp = RouteProp<RootStackParamList, "Solution">;
@@ -344,7 +355,6 @@ export default function SolutionPage() {
   ) => {
     if (table.length === 0) return { table, enteringVar: null as string | null, leavingVar: null as string | null };
 
-    // Handle both cases: table with or without Zj/Zj-Cj rows
     const hasZjRows = table.length > basicVars.length;
     const rowsCount = hasZjRows ? table.length - 2 : table.length;
     const cols = table[0].length;
@@ -364,7 +374,6 @@ export default function SolutionPage() {
       zjRow[j] = sum;
     }
 
-    // Calculate Zj - Cj (not Cj - Zj)
     const zjMinusCjRow = Array(cols).fill(0);
     for (let j = 0; j < cols - 1; j++) {
       if (j < cjRow.length) {
@@ -373,14 +382,13 @@ export default function SolutionPage() {
         zjMinusCjRow[j] = zjRow[j];
       }
     }
-    zjMinusCjRow[cols - 1] = 0; // RHS column
+    zjMinusCjRow[cols - 1] = 0;
 
     for (let j = 0; j < cols; j++) {
       if (Math.abs(zjRow[j]) < 1e-10) zjRow[j] = 0;
       if (Math.abs(zjMinusCjRow[j]) < 1e-10) zjMinusCjRow[j] = 0;
     }
 
-    // Always build new table with only constraint rows + new Zj and Zj-Cj
     const newTable: number[][] = [];
     for (let i = 0; i < rowsCount; i++) {
       newTable.push([...table[i]]);
@@ -388,8 +396,6 @@ export default function SolutionPage() {
     newTable.push(zjRow);
     newTable.push(zjMinusCjRow);
 
-    // For MAXIMIZATION: optimal when all Zj - Cj ≤ 0 (or equivalently, when min(Zj-Cj) >= 0)
-    // We enter the variable with the MOST NEGATIVE Zj - Cj value
     const zjMinusCjVars = zjMinusCjRow.slice(0, allVars.length);
     const minVal = Math.min(...zjMinusCjVars);
     
@@ -419,7 +425,6 @@ export default function SolutionPage() {
   };
 
   const performPivot = (currentTable: number[][], pivotRowIdx: number, pivotColIdx: number) => {
-    // Take only constraint rows (exclude Zj and Zj-Cj if present)
     const hasZjRows = currentTable.length > basicVariables.length;
     const rowsCount = hasZjRows ? currentTable.length - 2 : currentTable.length;
     
@@ -435,7 +440,6 @@ export default function SolutionPage() {
       throw new Error("Pivot value is too close to zero.");
     }
 
-    // 1. Normalize the pivot row
     for (let j = 0; j < cols; j++) {
       table[pivotRowIdx][j] = table[pivotRowIdx][j] / pivotVal;
       if (Math.abs(table[pivotRowIdx][j]) < 1e-12) {
@@ -443,7 +447,6 @@ export default function SolutionPage() {
       }
     }
 
-    // 2. Clear other elements in the pivot column (make them 0)
     for (let i = 0; i < rowsCount; i++) {
       if (i === pivotRowIdx) continue;
       const factor = table[i][pivotColIdx];
@@ -457,7 +460,6 @@ export default function SolutionPage() {
       }
     }
 
-    // Return only constraint rows
     return table;
   };
 
@@ -536,11 +538,9 @@ export default function SolutionPage() {
     const zjRow = simplexTable[simplexTable.length - 2];
     const optimalZ = zjRow[cols - 1];
     
-    // If we minimized by negating, negate back
     const actualZ = optType === "Minimize" ? -optimalZ : optimalZ;
     
-    let message = ``;
-    
+    let message = `Optimal Solution Found:\nZ = ${decimalToFraction(actualZ)}\n`;
     
     for (let i = 0; i < originalVarCount; i++) {
       const originalVar = `x${i + 1}`;
@@ -556,7 +556,6 @@ export default function SolutionPage() {
     
     let value = 0;
     
-    // Find all transforms related to this original variable
     const relatedTransforms = variableTransforms.filter(t => t.originalIndex === originalIndex);
     
     for (const transform of relatedTransforms) {
@@ -581,7 +580,6 @@ export default function SolutionPage() {
             break;
         }
       }
-      // If not in basis, the variable's contribution is 0
     }
     
     return value;
@@ -675,6 +673,63 @@ export default function SolutionPage() {
     setBasicVariables(currentBasics);
     setIteration(currentIteration);
     setMessage("Stopped: reached maximum automatic iterations limit.");
+  };
+
+  const handleSensitivityAnalysis = () => {
+    if (!simplexTable || simplexTable.length < 2) {
+      Alert.alert("Error", "No valid solution table available for sensitivity analysis.");
+      return;
+    }
+
+    if (!message?.includes("Optimal")) {
+      Alert.alert(
+        "Warning",
+        "Sensitivity analysis is typically performed on an optimal solution. Please solve to optimal first.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Continue Anyway", onPress: () => navigateToSensitivity() }
+        ]
+      );
+      return;
+    }
+
+    navigateToSensitivity();
+  };
+
+  const navigateToSensitivity = () => {
+    // Calculate B-inverse from slack variable columns
+    const m = simplexTable.length - 2;
+    const bInv: number[][] = [];
+    
+    for (let i = 0; i < m; i++) {
+      const row: number[] = [];
+      for (let j = 0; j < m; j++) {
+        const slackVar = `s${j + 1}`;
+        const idx = variables.indexOf(slackVar);
+        
+        if (idx !== -1) {
+          row.push(simplexTable[i][idx]);
+        } else {
+          row.push(i === j ? 1 : 0);
+        }
+      }
+      bInv.push(row);
+    }
+
+    // For minimization problems, we need to adjust the objective coefficients back
+    const adjustedCj = optType === "Minimize" ? cj.map(c => -c) : cj.slice();
+
+    navigation.navigate("SensitivityAnalysis", {
+      finalTable: simplexTable.map(row => [...row]),
+      variables: variables.slice(),
+      basicVariables: basicVariables.slice(),
+      cj: adjustedCj,
+      optType: optType,
+      originalObjective: initialObjective.slice(),
+      variableSigns: variableSigns.slice(),
+      constraintsMatrix: initialConstraints.map(row => [...row]),
+      originalRHS: initialRhs.slice(),
+    });
   };
 
   const renderSimplexTable = () => {
@@ -844,6 +899,18 @@ export default function SolutionPage() {
           </TouchableOpacity>
         </View>
 
+        <View style={{ marginTop: 10 }}>
+          <TouchableOpacity
+            style={[
+              styles.sensitivityButton,
+              !message?.includes("Optimal") && { opacity: 0.6 }
+            ]}
+            onPress={handleSensitivityAnalysis}
+          >
+            <Text style={styles.sensitivityButtonText}>📊 Sensitivity Analysis</Text>
+          </TouchableOpacity>
+        </View>
+
         <View style={{ marginTop: 10, flexDirection: "row", justifyContent: "space-between" }}>
           <TouchableOpacity 
             style={[styles.solveButton, (isOptimal || message?.startsWith("Problem is unbounded")) && { backgroundColor: "#9E9E9E" }]} 
@@ -888,6 +955,17 @@ const styles = StyleSheet.create({
   nextButtonText: { color: "#fff", fontWeight: "bold", fontSize: 14 },
   solveButton: { backgroundColor: "#2196F3", padding: 12, borderRadius: 30, alignItems: "center", flex: 1 },
   solveButtonText: { color: "#fff", fontWeight: "bold" },
+  sensitivityButton: {
+    backgroundColor: "#9C27B0",
+    padding: 15,
+    borderRadius: 30,
+    alignItems: "center",
+  },
+  sensitivityButtonText: {
+    color: "#fff",
+    fontWeight: "bold",
+    fontSize: 16,
+  },
   pivotRow: { backgroundColor: "rgba(255, 100, 100, 0.3)" },
   pivotCol: { backgroundColor: "rgba(100, 255, 100, 0.3)" },
   pivotElement: { backgroundColor: "rgba(255, 255, 100, 0.5)" },

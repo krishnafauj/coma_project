@@ -51,7 +51,7 @@ const decimalToFraction = (decimal: number): string => {
 export default function RHSChange() {
     const router = useRouter();
     const params = useLocalSearchParams();
-    
+
     // Parse the stringified parameters
     const finalTable = JSON.parse(params.finalTable as string);
     const variables = JSON.parse(params.variables as string);
@@ -157,12 +157,14 @@ export default function RHSChange() {
         const rowsCount = finalTable.length - 2;
         const newTable: number[][] = [];
 
+        // Reconstruct the table with new RHS values
         for (let i = 0; i < rowsCount; i++) {
             const newRow = [...finalTable[i]];
-            newRow[newRow.length - 1] = newBasicSolution[i];
+            newRow[newRow.length - 1] = newBasicSolution[i]; // ← Use calculated new basic solution
             newTable.push(newRow);
         }
 
+        // Add placeholder Zj and Zj-Cj rows
         const cols = finalTable[0].length;
         newTable.push(Array(cols).fill(0));
         newTable.push(Array(cols).fill(0));
@@ -174,7 +176,6 @@ export default function RHSChange() {
             `One or more basic variables became negative.\n` +
             `Applying Dual Simplex to restore feasibility.`;
 
-        // Use Expo Router navigation
         router.push({
             pathname: '/(tabs)/DualSimplexSolver',
             params: {

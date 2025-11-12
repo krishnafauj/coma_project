@@ -96,6 +96,17 @@ type RootStackParamList = {
         constraintTypes: string[];
         variableSigns: string[];
     };
+    SensitivityAnalysis: {
+        finalTable: number[][];
+        variables: string[];
+        basicVariables: string[];
+        cj: number[];
+        optType: string;
+        originalObjective: number[];
+        variableSigns: string[];
+        constraintsMatrix: number[][];
+        originalRHS: number[];
+    };
     Phase1: {
         objective: number[];
         constraintsMatrix: number[][];
@@ -112,6 +123,17 @@ type RootStackParamList = {
         optType: string;
         variableSigns: string[];
         transformedVariableNames: string[];
+       
+    };
+     RHSChange: {
+        finalTable: number[][];
+        variables: string[];
+        basicVariables: string[];
+        cj: number[];
+        optType: string;
+        constraintsMatrix: number[][];
+        originalRHS: number[];
+        bInverse: number[][]; // ← ADD THIS LINE
     };
 };
 
@@ -273,6 +295,7 @@ export default function Phase2() {
         setMessage(finalMessage);
     };
 
+
     // *** MODIFICATION: createPhase2Table now passes original coefficients ***
     const createPhase2Table = () => {
         if (
@@ -411,102 +434,102 @@ export default function Phase2() {
     };
 
     // *** MODIFICATION: This function now handles BOTH Min and Max logic ***
-const computeZjAndZjMinusCj = (
-    table: number[][],
-    basicVars: string[],
-    cjRow: number[],
-    allVars: string[]
-) => {
-    if (table.length < 2 || basicVars.length === 0 || table[0].length === 0) {
-        return { table, enteringVar: null, leavingVar: null };
-    }
-
-    const rowsCount = table.length - 2;
-    const cols = table[0].length;
-
-    const cb: number[] = basicVars.map((b) => {
-        const idx = allVars.indexOf(b);
-        if (idx === -1) {
-            console.warn(`Basic variable ${b} not found in allVars list.`);
-            return 0;
+    const computeZjAndZjMinusCj = (
+        table: number[][],
+        basicVars: string[],
+        cjRow: number[],
+        allVars: string[]
+    ) => {
+        if (table.length < 2 || basicVars.length === 0 || table[0].length === 0) {
+            return { table, enteringVar: null, leavingVar: null };
         }
-        return cjRow[idx] ?? 0;
-    });
 
-    const zjRow = Array(cols).fill(0);
-    for (let j = 0; j < cols; j++) {
-        let sum = 0;
-        for (let i = 0; i < rowsCount; i++) {
-            sum += (cb[i] || 0) * (table[i][j] || 0);
+        const rowsCount = table.length - 2;
+        const cols = table[0].length;
+
+        const cb: number[] = basicVars.map((b) => {
+            const idx = allVars.indexOf(b);
+            if (idx === -1) {
+                console.warn(`Basic variable ${b} not found in allVars list.`);
+                return 0;
+            }
+            return cjRow[idx] ?? 0;
+        });
+
+        const zjRow = Array(cols).fill(0);
+        for (let j = 0; j < cols; j++) {
+            let sum = 0;
+            for (let i = 0; i < rowsCount; i++) {
+                sum += (cb[i] || 0) * (table[i][j] || 0);
+            }
+            zjRow[j] = sum;
         }
-        zjRow[j] = sum;
-    }
 
-    // Cj - Zj for Phase 2
-    const cjMinusZjRow = Array(cols).fill(0);
-    for (let j = 0; j < cols; j++) {
-        if (j < cjRow.length) {
-            cjMinusZjRow[j] = (cjRow[j] || 0) - (zjRow[j] || 0);
-        } else {
-            cjMinusZjRow[j] = 0;
-        }
-    }
-
-    for (let j = 0; j < cols; j++) {
-        if (Math.abs(zjRow[j]) < 1e-10) zjRow[j] = 0;
-        if (Math.abs(cjMinusZjRow[j]) < 1e-10) cjMinusZjRow[j] = 0;
-    }
-
-    const newTable = table.slice(0, rowsCount).map((r) => r.slice());
-    newTable.push(zjRow);
-    newTable.push(cjMinusZjRow);
-
-    const cjMinusZjVars = cjMinusZjRow.slice(0, allVars.length);
-    if (cjMinusZjVars.length === 0) {
-        return { table: newTable, enteringVar: null, leavingVar: null };
-    }
-
-    let enteringIndex = -1;
-    
-    if (optType === "Maximize") {
-        // Maximization: Enter on most POSITIVE Cj-Zj
-        const maxVal = Math.max(...cjMinusZjVars);
-        if (maxVal <= 1e-10) {
-            return { table: newTable, enteringVar: null, leavingVar: null };
-        }
-        enteringIndex = cjMinusZjVars.indexOf(maxVal);
-    } else {
-        // Minimization: Enter on most NEGATIVE Cj-Zj
-        const minVal = Math.min(...cjMinusZjVars);
-        if (minVal >= -1e-10) {
-            return { table: newTable, enteringVar: null, leavingVar: null };
-        }
-        enteringIndex = cjMinusZjVars.indexOf(minVal);
-    }
-    
-    const enteringVarName = allVars[enteringIndex];
-
-    let minRatio = Infinity;
-    let leavingIdx = -1;
-    for (let i = 0; i < rowsCount; i++) {
-        const colVal = newTable[i][enteringIndex];
-        const rhsVal = newTable[i][newTable[i].length - 1];
-        if (colVal > 1e-10) {
-            const ratio = rhsVal / colVal;
-            if (ratio >= -1e-10 && ratio < minRatio - 1e-10) {
-                minRatio = ratio;
-                leavingIdx = i;
+        // Cj - Zj for Phase 2
+        const cjMinusZjRow = Array(cols).fill(0);
+        for (let j = 0; j < cols; j++) {
+            if (j < cjRow.length) {
+                cjMinusZjRow[j] = (cjRow[j] || 0) - (zjRow[j] || 0);
+            } else {
+                cjMinusZjRow[j] = 0;
             }
         }
-    }
 
-    const leavingVarName = leavingIdx === -1 ? null : basicVars[leavingIdx];
-    return {
-        table: newTable,
-        enteringVar: enteringVarName,
-        leavingVar: leavingVarName,
+        for (let j = 0; j < cols; j++) {
+            if (Math.abs(zjRow[j]) < 1e-10) zjRow[j] = 0;
+            if (Math.abs(cjMinusZjRow[j]) < 1e-10) cjMinusZjRow[j] = 0;
+        }
+
+        const newTable = table.slice(0, rowsCount).map((r) => r.slice());
+        newTable.push(zjRow);
+        newTable.push(cjMinusZjRow);
+
+        const cjMinusZjVars = cjMinusZjRow.slice(0, allVars.length);
+        if (cjMinusZjVars.length === 0) {
+            return { table: newTable, enteringVar: null, leavingVar: null };
+        }
+
+        let enteringIndex = -1;
+
+        if (optType === "Maximize") {
+            // Maximization: Enter on most POSITIVE Cj-Zj
+            const maxVal = Math.max(...cjMinusZjVars);
+            if (maxVal <= 1e-10) {
+                return { table: newTable, enteringVar: null, leavingVar: null };
+            }
+            enteringIndex = cjMinusZjVars.indexOf(maxVal);
+        } else {
+            // Minimization: Enter on most NEGATIVE Cj-Zj
+            const minVal = Math.min(...cjMinusZjVars);
+            if (minVal >= -1e-10) {
+                return { table: newTable, enteringVar: null, leavingVar: null };
+            }
+            enteringIndex = cjMinusZjVars.indexOf(minVal);
+        }
+
+        const enteringVarName = allVars[enteringIndex];
+
+        let minRatio = Infinity;
+        let leavingIdx = -1;
+        for (let i = 0; i < rowsCount; i++) {
+            const colVal = newTable[i][enteringIndex];
+            const rhsVal = newTable[i][newTable[i].length - 1];
+            if (colVal > 1e-10) {
+                const ratio = rhsVal / colVal;
+                if (ratio >= -1e-10 && ratio < minRatio - 1e-10) {
+                    minRatio = ratio;
+                    leavingIdx = i;
+                }
+            }
+        }
+
+        const leavingVarName = leavingIdx === -1 ? null : basicVars[leavingIdx];
+        return {
+            table: newTable,
+            enteringVar: enteringVarName,
+            leavingVar: leavingVarName,
+        };
     };
-};
 
     // --- (performPivot function remains unchanged) ---
     const performPivot = (
@@ -547,50 +570,50 @@ const computeZjAndZjMinusCj = (
 
     // *** MODIFICATION: Updated handleNextIteration with dual logic ***
     const handleNextIteration = () => {
-       if (!simplexTable || simplexTable.length < 2) return;
+        if (!simplexTable || simplexTable.length < 2) return;
 
-    const rowsCount = simplexTable.length - 2;
-    const cols = simplexTable[0].length;
-    const cjMinusZjRow = simplexTable[simplexTable.length - 1];
-    const cjMinusZjVars = cjMinusZjRow.slice(0, variables.length);
+        const rowsCount = simplexTable.length - 2;
+        const cols = simplexTable[0].length;
+        const cjMinusZjRow = simplexTable[simplexTable.length - 1];
+        const cjMinusZjVars = cjMinusZjRow.slice(0, variables.length);
 
-    if (cjMinusZjVars.length === 0) {
-         setMessage("Phase 2 complete. Optimal solution found.");
-         displayFinalSolution(simplexTable, basicVariables, variables);
-         setEnteringVar(null);
-         setLeavingVar(null);
-        return;
-    }
+        if (cjMinusZjVars.length === 0) {
+            setMessage("Phase 2 complete. Optimal solution found.");
+            displayFinalSolution(simplexTable, basicVariables, variables);
+            setEnteringVar(null);
+            setLeavingVar(null);
+            return;
+        }
 
-    // Check optimality based on problem type
-    let isOptimal = false;
-    if (optType === "Maximize") {
-        const maxVal = Math.max(...cjMinusZjVars);
-        if (maxVal <= 1e-10) isOptimal = true;
-    } else {
-        const minVal = Math.min(...cjMinusZjVars);
-        if (minVal >= -1e-10) isOptimal = true;
-    }
+        // Check optimality based on problem type
+        let isOptimal = false;
+        if (optType === "Maximize") {
+            const maxVal = Math.max(...cjMinusZjVars);
+            if (maxVal <= 1e-10) isOptimal = true;
+        } else {
+            const minVal = Math.min(...cjMinusZjVars);
+            if (minVal >= -1e-10) isOptimal = true;
+        }
 
-    if (isOptimal) {
-        setMessage("Phase 2 complete. Optimal solution found.");
-        displayFinalSolution(simplexTable, basicVariables, variables);
-        setEnteringVar(null);
-        setLeavingVar(null);
-        return;
-    }
+        if (isOptimal) {
+            setMessage("Phase 2 complete. Optimal solution found.");
+            displayFinalSolution(simplexTable, basicVariables, variables);
+            setEnteringVar(null);
+            setLeavingVar(null);
+            return;
+        }
 
-    setMessage(null);
+        setMessage(null);
 
-    // Find entering variable
-    let enteringIndex: number;
-    if (optType === "Maximize") {
-        const maxVal = Math.max(...cjMinusZjVars);
-        enteringIndex = cjMinusZjVars.indexOf(maxVal);
-    } else {
-        const minVal = Math.min(...cjMinusZjVars);
-        enteringIndex = cjMinusZjVars.indexOf(minVal);
-    }
+        // Find entering variable
+        let enteringIndex: number;
+        if (optType === "Maximize") {
+            const maxVal = Math.max(...cjMinusZjVars);
+            enteringIndex = cjMinusZjVars.indexOf(maxVal);
+        } else {
+            const minVal = Math.min(...cjMinusZjVars);
+            enteringIndex = cjMinusZjVars.indexOf(minVal);
+        }
 
         let minRatio = Infinity;
         let leavingRowIdx = -1;
@@ -666,222 +689,284 @@ const computeZjAndZjMinusCj = (
     };
 
     // *** MODIFICATION: Updated handleSolveToOptimal with dual logic ***
-   const handleSolveToOptimal = () => {
-    setMessage(null);
+    const handleSolveToOptimal = () => {
+        setMessage(null);
 
-    const solve = (
-        currentTable: number[][],
-        currentBasics: string[],
-        currentIteration: number
-    ): void => {
-        const maxIterations = 100;
+        const solve = (
+            currentTable: number[][],
+            currentBasics: string[],
+            currentIteration: number
+        ): void => {
+            const maxIterations = 100;
 
-        if (currentIteration > maxIterations) {
-            setMessage("Stopped: reached maximum automatic iterations limit.");
-            return;
-        }
-
-        const lastRow = currentTable[currentTable.length - 1] ?? [];
-        const cjMinusZjVars = lastRow.slice(0, variables.length);  // FIXED: correct name
-
-        let isOptimal = false;
-        let enteringIndex = -1;
-
-        if (optType === "Maximize") {
-            // FIXED: For Maximize, find MAXIMUM Cj-Zj
-            const maxVal = cjMinusZjVars.length ? Math.max(...cjMinusZjVars) : -Infinity;
-            if (maxVal <= 1e-10) {
-                isOptimal = true;
-            } else {
-                enteringIndex = cjMinusZjVars.indexOf(maxVal);
+            if (currentIteration > maxIterations) {
+                setMessage("Stopped: reached maximum automatic iterations limit.");
+                return;
             }
-        } else { // Minimize
-            // FIXED: For Minimize, find MINIMUM Cj-Zj
-            const minVal = cjMinusZjVars.length ? Math.min(...cjMinusZjVars) : Infinity;
-            if (minVal >= -1e-10) {
-                isOptimal = true;
-            } else {
-                enteringIndex = cjMinusZjVars.indexOf(minVal);
-            }
-        }
 
-        if (isOptimal) {
-            setMessage("Phase 2 complete. Optimal solution found.");
-            displayFinalSolution(currentTable, currentBasics, variables);
-            setEnteringVar(null);
-            setLeavingVar(null);
-            return;
-        }
+            const lastRow = currentTable[currentTable.length - 1] ?? [];
+            const cjMinusZjVars = lastRow.slice(0, variables.length);  // FIXED: correct name
 
-        let minRatio = Infinity;
-        let leavingRowIdx = -1;
-        const rowsCount = currentTable.length - 2;
-        const cols = currentTable[0].length;
+            let isOptimal = false;
+            let enteringIndex = -1;
 
-        for (let i = 0; i < rowsCount; i++) {
-            const colVal = currentTable[i][enteringIndex];
-            const rhsVal = currentTable[i][cols - 1];
-            if (colVal > 1e-10) {
-                const ratio = rhsVal / colVal;
-                if (ratio >= -1e-10 && ratio < minRatio - 1e-10) {
-                    minRatio = ratio;
-                    leavingRowIdx = i;
+            if (optType === "Maximize") {
+                // FIXED: For Maximize, find MAXIMUM Cj-Zj
+                const maxVal = cjMinusZjVars.length ? Math.max(...cjMinusZjVars) : -Infinity;
+                if (maxVal <= 1e-10) {
+                    isOptimal = true;
+                } else {
+                    enteringIndex = cjMinusZjVars.indexOf(maxVal);
+                }
+            } else { // Minimize
+                // FIXED: For Minimize, find MINIMUM Cj-Zj
+                const minVal = cjMinusZjVars.length ? Math.min(...cjMinusZjVars) : Infinity;
+                if (minVal >= -1e-10) {
+                    isOptimal = true;
+                } else {
+                    enteringIndex = cjMinusZjVars.indexOf(minVal);
                 }
             }
-        }
 
-        if (leavingRowIdx === -1) {
-            setMessage("Phase 2 problem is unbounded.");
-            setEnteringVar(variables[enteringIndex]);
-            setLeavingVar(null);
+            if (isOptimal) {
+                setMessage("Phase 2 complete. Optimal solution found.");
+                displayFinalSolution(currentTable, currentBasics, variables);
+                setEnteringVar(null);
+                setLeavingVar(null);
+                return;
+            }
+
+            let minRatio = Infinity;
+            let leavingRowIdx = -1;
+            const rowsCount = currentTable.length - 2;
+            const cols = currentTable[0].length;
+
+            for (let i = 0; i < rowsCount; i++) {
+                const colVal = currentTable[i][enteringIndex];
+                const rhsVal = currentTable[i][cols - 1];
+                if (colVal > 1e-10) {
+                    const ratio = rhsVal / colVal;
+                    if (ratio >= -1e-10 && ratio < minRatio - 1e-10) {
+                        minRatio = ratio;
+                        leavingRowIdx = i;
+                    }
+                }
+            }
+
+            if (leavingRowIdx === -1) {
+                setMessage("Phase 2 problem is unbounded.");
+                setEnteringVar(variables[enteringIndex]);
+                setLeavingVar(null);
+                return;
+            }
+
+            try {
+                const newTable = performPivot(currentTable, leavingRowIdx, enteringIndex);
+                const newBasics = currentBasics.slice();
+                newBasics[leavingRowIdx] = variables[enteringIndex];
+                const computed = computeZjAndZjMinusCj(
+                    newTable,
+                    newBasics,
+                    cj,
+                    variables
+                );
+
+                setSimplexTable(computed.table);
+                setBasicVariables(newBasics);
+                setIteration(currentIteration + 1);
+
+                setTimeout(() => {
+                    solve(computed.table, newBasics, currentIteration + 1);
+                }, 50);
+            } catch (err) {
+                setMessage("Error during automatic pivot: " + (err as Error).message);
+            }
+        };
+
+        solve(simplexTable, basicVariables, iteration);
+    };
+
+    const handleSensitivityAnalysis = () => {
+        if (!simplexTable || simplexTable.length < 2) {
+            Alert.alert("Error", "No valid solution table available for sensitivity analysis.");
             return;
         }
 
-        try {
-            const newTable = performPivot(currentTable, leavingRowIdx, enteringIndex);
-            const newBasics = currentBasics.slice();
-            newBasics[leavingRowIdx] = variables[enteringIndex];
-            const computed = computeZjAndZjMinusCj(
-                newTable,
-                newBasics,
-                cj,
-                variables
+        if (!message?.includes("complete") && !message?.includes("Optimal")) {
+            Alert.alert(
+                "Warning",
+                "Sensitivity analysis is typically performed on an optimal solution. Please solve to optimal first.",
+                [
+                    { text: "Cancel", style: "cancel" },
+                    { text: "Continue Anyway", onPress: () => navigateToSensitivity() }
+                ]
             );
-
-            setSimplexTable(computed.table);
-            setBasicVariables(newBasics);
-            setIteration(currentIteration + 1);
-
-            setTimeout(() => {
-                solve(computed.table, newBasics, currentIteration + 1);
-            }, 50);
-        } catch (err) {
-            setMessage("Error during automatic pivot: " + (err as Error).message);
+            return;
         }
+
+        navigateToSensitivity();
     };
+    const navigateToSensitivity = () => {
+    // Calculate B-inverse
+    const m = simplexTable.length - 2;
+    const bInv: number[][] = [];
+    
+    for (let i = 0; i < m; i++) {
+        const row: number[] = [];
+        for (let j = 0; j < m; j++) {
+            const slackVar = `s${j + 1}`;
+            const idx = variables.indexOf(slackVar);
+            
+            if (idx !== -1) {
+                row.push(simplexTable[i][idx]);
+            } else {
+                row.push(i === j ? 1 : 0);
+            }
+        }
+        bInv.push(row);
+    }
 
-    solve(simplexTable, basicVariables, iteration);
+    navigation.navigate("SensitivityAnalysis", {
+        finalTable: simplexTable.map(row => [...row]),
+        variables: variables.slice(),
+        basicVariables: basicVariables.slice(),
+        cj: cj.slice(),
+        optType: optType,
+        originalObjective: originalObjective.slice(),
+        variableSigns: variableSigns.slice(),
+        constraintsMatrix: phase1Table.slice(0, -2).map(row =>
+            row.slice(0, -1).filter((_, idx) => !phase1Variables[idx]?.startsWith('a'))
+        ),
+        originalRHS: phase1Table.slice(0, -2).map(row =>
+            row[row.length - 1]
+        ),
+    });
 };
-
     // *** MODIFICATION: Updated renderSimplexTable with dual highlighting ***
     const renderSimplexTable = () => {
-        if (simplexTable.length === 0) return null;
+    if (simplexTable.length === 0) return null;
+    if (!Array.isArray(simplexTable) || simplexTable.length < 2) return null;
 
-        const numVars = variables.length;
-        const screenWidth = Dimensions.get("window").width;
-        const cellWidth = Math.max(70, screenWidth / (numVars + 3));
+    const numVars = variables.length;
+    const screenWidth = Dimensions.get("window").width;
+    const cellWidth = Math.max(70, screenWidth / (numVars + 3));
 
-        return (
-            <View style={styles.tableContainer}>
-                <ScrollView horizontal showsHorizontalScrollIndicator={true}>
-                    <View>
-                        {/* Cj Row */}
-                        <View style={[styles.row, styles.cjRow]}>
-                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                <Text style={styles.headerText}>Cj →</Text>
-                            </View>
-                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                <Text style={styles.headerText}></Text>
-                            </View>
-                            {cj.map((value, index) => (
-                                <View key={index} style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                    <Text style={styles.headerText}>{decimalToFraction(value)}</Text>
-                                </View>
-                            ))}
-                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                <Text style={styles.headerText}></Text>
-                            </View>
+    return (
+        <View style={styles.tableContainer}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={true}>
+                <View>
+                    {/* Cj Row */}
+                    <View style={[styles.row, styles.cjRow]}>
+                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                            <Text style={styles.headerText}>Cj →</Text>
                         </View>
-
-                        {/* Header Row */}
-                        <View style={[styles.row, styles.headerRow]}>
-                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                <Text style={styles.headerText}>Basis</Text>
-                            </View>
-                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                <Text style={styles.headerText}>CB</Text>
-                            </View>
-                            {variables.map((variable, index) => (
-                                <View key={index} style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                    <Text style={styles.headerText}>{variable}</Text>
-                                </View>
-                            ))}
-                            <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
-                                <Text style={styles.headerText}>Solution</Text>
-                            </View>
+                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                            <Text style={styles.headerText}>{" "}</Text>
                         </View>
-
-                        {/* Table Rows */}
-                        {simplexTable.slice(0, -2).map((row, rowIndex) => (
-                            <View key={rowIndex} style={styles.row}>
-                                <View style={[styles.cell, { width: cellWidth }]}>
-                                    <Text style={styles.cellText}>{basicVariables[rowIndex]}</Text>
-                                </View>
-                                <View style={[styles.cell, { width: cellWidth }]}>
-                                    {(() => {
-                                        const idx = variables.indexOf(basicVariables[rowIndex]);
-                                        return (
-                                            <Text style={styles.cellText}>
-                                                {idx === -1 ? "0" : decimalToFraction(cj[idx])}
-                                            </Text>
-                                        );
-                                    })()}
-                                </View>
-                                {row.map((value, colIndex) => (
-                                    <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
-                                        <Text style={styles.cellText}>{decimalToFraction(value)}</Text>
-                                    </View>
-                                ))}
+                        {cj.map((value, index) => (
+                            <View key={index} style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                <Text style={styles.headerText}>{decimalToFraction(value)}</Text>
                             </View>
                         ))}
+                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                            <Text style={styles.headerText}>{" "}</Text>
+                        </View>
+                    </View>
 
-                        {/* Zj Row */}
-                        <View style={[styles.row, styles.zjRow]}>
+                    {/* Header Row */}
+                    <View style={[styles.row, styles.headerRow]}>
+                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                            <Text style={styles.headerText}>Basis</Text>
+                        </View>
+                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                            <Text style={styles.headerText}>CB</Text>
+                        </View>
+                        {variables.map((variable, index) => (
+                            <View key={index} style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                                <Text style={styles.headerText}>{variable}</Text>
+                            </View>
+                        ))}
+                        <View style={[styles.cell, styles.headerCell, { width: cellWidth }]}>
+                            <Text style={styles.headerText}>Solution</Text>
+                        </View>
+                    </View>
+
+                    {/* Table Rows */}
+                    {simplexTable.slice(0, -2).map((row, rowIndex) => (
+                        <View key={rowIndex} style={styles.row}>
                             <View style={[styles.cell, { width: cellWidth }]}>
-                                <Text style={styles.cellText}>Zj</Text>
+                                <Text style={styles.cellText}>{basicVariables[rowIndex] || ""}</Text>
                             </View>
                             <View style={[styles.cell, { width: cellWidth }]}>
-                                <Text style={styles.cellText}></Text>
+                                {(() => {
+                                    const idx = variables.indexOf(basicVariables[rowIndex]);
+                                    return (
+                                        <Text style={styles.cellText}>
+                                            {idx === -1 ? "0" : decimalToFraction(cj[idx])}
+                                        </Text>
+                                    );
+                                })()}
                             </View>
-                            {simplexTable[simplexTable.length - 2].map((value, colIndex) => (
+                            {row.map((value, colIndex) => (
                                 <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
-                                    <Text style={styles.cellText}>{decimalToFraction(value)}</Text>
+                                    <Text style={styles.cellText}>
+                                        {value !== undefined ? decimalToFraction(value) : "0"}
+                                    </Text>
                                 </View>
                             ))}
                         </View>
+                    ))}
 
-                        {/* Zj - Cj Row */}
-                        <View style={[styles.row, styles.zjCjRow]}>
-                            <View style={[styles.cell, { width: cellWidth }]}>
-                                <Text style={styles.cellText}>Cj - Zj</Text>  {/* Changed from Zj - Cj */}
+                    {/* Zj Row */}
+                    <View style={[styles.row, styles.zjRow]}>
+                        <View style={[styles.cell, { width: cellWidth }]}>
+                            <Text style={styles.cellText}>Zj</Text>
+                        </View>
+                        <View style={[styles.cell, { width: cellWidth }]}>
+                            <Text style={styles.cellText}>{" "}</Text>
+                        </View>
+                        {simplexTable[simplexTable.length - 2]?.map((value, colIndex) => (
+                            <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
+                                <Text style={styles.cellText}>
+                                    {value !== undefined ? decimalToFraction(value) : "0"}
+                                </Text>
                             </View>
-                            <View style={[styles.cell, { width: cellWidth }]}>
-                                <Text style={styles.cellText}></Text>
-                            </View>
-                            {simplexTable[simplexTable.length - 1].map((value, colIndex) => {
-                                let textStyle = styles.cellText;
-                                // Highlight based on problem type
+                        )) || null}
+                    </View>
+
+                    {/* Cj - Zj Row */}
+                    <View style={[styles.row, styles.zjCjRow]}>
+                        <View style={[styles.cell, { width: cellWidth }]}>
+                            <Text style={styles.cellText}>Cj - Zj</Text>
+                        </View>
+                        <View style={[styles.cell, { width: cellWidth }]}>
+                            <Text style={styles.cellText}>{" "}</Text>
+                        </View>
+                        {simplexTable[simplexTable.length - 1]?.map((value, colIndex) => {
+                            let textStyle = styles.cellText;
+                            // Highlight based on problem type
+                            if (value !== undefined) {
                                 if (optType === "Maximize" && value > 1e-10) {
                                     textStyle = { ...textStyle, ...styles.positiveValue };
                                 } else if (optType === "Minimize" && value < -1e-10) {
                                     textStyle = { ...textStyle, ...styles.negativeValue };
                                 }
+                            }
 
-                                return (
-                                    <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
-                                        <Text style={textStyle}>
-                                            {decimalToFraction(value)}
-                                        </Text>
-                                    </View>
-                                );
-                            })}
-                        </View>
+                            return (
+                                <View key={colIndex} style={[styles.cell, { width: cellWidth }]}>
+                                    <Text style={textStyle}>
+                                        {value !== undefined ? decimalToFraction(value) : "0"}
+                                    </Text>
+                                </View>
+                            );
+                        }) || null}
                     </View>
-                </ScrollView>
-            </View>
-        );
-    };
-
+                </View>
+            </ScrollView>
+        </View>
+    );
+};
     const handleGoBack = () => {
         navigation.goBack();
     };
@@ -946,7 +1031,17 @@ const computeZjAndZjMinusCj = (
                         <Text style={styles.nextButtonText}>Next Iteration</Text>
                     </TouchableOpacity>
                 </View>
-
+                <View style={{ marginTop: 10 }}>
+                    <TouchableOpacity
+                        style={[
+                            styles.sensitivityButton,
+                            !message?.includes("complete") && { opacity: 0.6 }
+                        ]}
+                        onPress={handleSensitivityAnalysis}
+                    >
+                        <Text style={styles.sensitivityButtonText}>📊 Sensitivity Analysis</Text>
+                    </TouchableOpacity>
+                </View>
                 <View
                     style={{
                         marginTop: 10,
@@ -1067,5 +1162,17 @@ const styles = StyleSheet.create({
         flex: 1,
     },
     solveButtonText: { color: "#fff", fontWeight: "bold" },
+    sensitivityButton: {
+        backgroundColor: "#9C27B0",
+        padding: 15,
+        borderRadius: 30,
+        alignItems: "center",
+        marginTop: 10,
+    },
+    sensitivityButtonText: {
+        color: "#fff",
+        fontWeight: "bold",
+        fontSize: 16,
+    },
 
 });

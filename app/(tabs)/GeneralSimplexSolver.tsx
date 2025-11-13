@@ -55,6 +55,12 @@ export default function GeneralSimplexSolver() {
     const cj = JSON.parse(params.cj as string);
     const optType = params.optType as string;
     const reason = params.reason as string;
+    
+    // Original data for sensitivity analysis
+    const originalObjective = params.originalObjective ? JSON.parse(params.originalObjective as string) : cj;
+    const variableSigns = params.variableSigns ? JSON.parse(params.variableSigns as string) : [];
+    const constraintsMatrix = params.constraintsMatrix ? JSON.parse(params.constraintsMatrix as string) : [];
+    const originalRHS = params.originalRHS ? JSON.parse(params.originalRHS as string) : [];
 
     const [simplexTable, setSimplexTable] = useState<number[][]>([]);
     const [basicVariables, setBasicVariables] = useState<string[]>([]);
@@ -393,6 +399,44 @@ export default function GeneralSimplexSolver() {
         solve(simplexTable, basicVariables, iteration);
     };
 
+    const handleSensitivityAnalysis = () => {
+        if (!simplexTable || simplexTable.length < 2) {
+            Alert.alert("Error", "No valid solution table available for sensitivity analysis.");
+            return;
+        }
+
+        if (!message?.includes("Optimal")) {
+            Alert.alert(
+                "Warning",
+                "Sensitivity analysis is typically performed on an optimal solution. Please solve to optimal first.",
+                [
+                    { text: "Cancel", style: "cancel" },
+                    { text: "Continue Anyway", onPress: () => navigateToSensitivity() }
+                ]
+            );
+            return;
+        }
+
+        navigateToSensitivity();
+    };
+
+    const navigateToSensitivity = () => {
+        router.push({
+            pathname: "/SensitivityAnalysis",
+            params: {
+                finalTable: JSON.stringify(simplexTable.map(row => [...row])),
+                variables: JSON.stringify(variables.slice()),
+                basicVariables: JSON.stringify(basicVariables.slice()),
+                cj: JSON.stringify(cj.slice()),
+                optType: optType,
+                originalObjective: JSON.stringify(originalObjective),
+                variableSigns: JSON.stringify(variableSigns),
+                constraintsMatrix: JSON.stringify(constraintsMatrix),
+                originalRHS: JSON.stringify(originalRHS),
+            }
+        });
+    };
+
     const renderSimplexTable = () => {
         if (!simplexTable || simplexTable.length < 2) return null;
 
@@ -507,8 +551,8 @@ export default function GeneralSimplexSolver() {
                             {simplexTable[simplexTable.length - 1].map((value, colIndex) => {
                                 let highlightStyle = {};
                                 if (colIndex < variables.length) {
-                                    // For Maximize: highlight POSITIVE values (need to improve)
-                                    // For Minimize: highlight NEGATIVE values (need to improve)
+                                    // For Maximize: highlight POSITIVE values (can improve)
+                                    // For Minimize: highlight NEGATIVE values (can improve)
                                     if (optType === "Maximize" && value > 1e-10) {
                                         highlightStyle = styles.positiveValue;
                                     } else if (optType === "Minimize" && value < -1e-10) {
@@ -631,6 +675,18 @@ export default function GeneralSimplexSolver() {
                     </TouchableOpacity>
                 </View>
 
+                <View style={{ marginTop: 10 }}>
+                    <TouchableOpacity
+                        style={[
+                            styles.sensitivityButton,
+                            !message?.includes("Optimal") && { opacity: 0.6 }
+                        ]}
+                        onPress={handleSensitivityAnalysis}
+                    >
+                        <Text style={styles.sensitivityButtonText}>📊 Sensitivity Analysis</Text>
+                    </TouchableOpacity>
+                </View>
+
                 <View style={{ height: 40 }} />
             </ScrollView>
         </View>
@@ -693,4 +749,6 @@ const styles = StyleSheet.create({
     nextButtonText: { color: "#fff", fontWeight: "bold", fontSize: 14 },
     solveButton: { backgroundColor: "#2196F3", padding: 12, borderRadius: 30, alignItems: "center" },
     solveButtonText: { color: "#fff", fontWeight: "bold" },
+    sensitivityButton: { backgroundColor: "#9C27B0", padding: 15, borderRadius: 30, alignItems: "center" },
+    sensitivityButtonText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
 });
